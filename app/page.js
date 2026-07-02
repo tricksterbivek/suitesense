@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
 import { EXAMPLES } from '../lib/examples.js';
 import { TABLES } from '../lib/schema.js';
@@ -8,12 +8,86 @@ import { TABLES } from '../lib/schema.js';
 const SUGGESTIONS = EXAMPLES.slice(0, 5).map((e) => e.question);
 const HISTORY_KEY = 'suitesense-history';
 
+/* Minimal inline icon set (Lucide paths) — no icon dependency. */
+function Icon({ d, size = 15, ...rest }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...rest}
+    >
+      {d.map((p, i) => (
+        <path key={i} d={p} />
+      ))}
+    </svg>
+  );
+}
+
+const I = {
+  sparkles: ['M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z'],
+  play: ['M6 4l14 8-14 8V4z'],
+  db: ['M12 8c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3z', 'M21 5v6c0 1.66-4.03 3-9 3s-9-1.34-9-3V5', 'M21 11v6c0 1.66-4.03 3-9 3s-9-1.34-9-3v-6'],
+  table: ['M3 5h18v14H3z', 'M3 10h18', 'M9 5v14'],
+  chart: ['M3 3v18h18', 'M8 17V9', 'M13 17V5', 'M18 17v-7'],
+  clock: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z', 'M12 6v6l4 2'],
+  alert: ['M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4', 'M12 17h.01'],
+  github: ['M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4'],
+  zap: ['M13 2L3 14h9l-1 8 10-12h-9l1-8z'],
+};
+
+/* Regex-pass SuiteQL highlighter: strings → comments → keywords → numbers. */
+const KEYWORDS =
+  'SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|ORDER|BY|HAVING|AND|OR|NOT|AS|IN|LIKE|BETWEEN|CASE|WHEN|THEN|ELSE|END|DISTINCT|UNION|ALL|NULL|IS|FETCH|FIRST|NEXT|ROWS|ONLY|OFFSET|LIMIT|DESC|ASC|SUM|COUNT|AVG|MIN|MAX|ROUND|NVL|IFNULL|TO_CHAR|ADD_MONTHS|SYSDATE|STRFTIME|DATE';
+const TOKEN_RE = new RegExp(`('[^']*'?)|(--[^\\n]*)|\\b(${KEYWORDS})\\b|\\b(\\d+(?:\\.\\d+)?)\\b`, 'gi');
+
+function highlightSql(sql) {
+  const esc = sql.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return esc.replace(TOKEN_RE, (m, str, com, kw, num) => {
+    if (str) return `<span class="tok-str">${m}</span>`;
+    if (com) return `<span class="tok-com">${m}</span>`;
+    if (kw) return `<span class="tok-kw">${m}</span>`;
+    if (num) return `<span class="tok-num">${m}</span>`;
+    return m;
+  });
+}
+
+function SqlEditor({ value, onChange }) {
+  const preRef = useRef(null);
+  const rows = Math.min(16, value.split('\n').length + 1);
+  return (
+    <div className="editor">
+      <pre ref={preRef} aria-hidden="true" dangerouslySetInnerHTML={{ __html: highlightSql(value) + '\n' }} />
+      <textarea
+        value={value}
+        rows={rows}
+        spellCheck={false}
+        aria-label="SuiteQL query editor"
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={(e) => {
+          if (preRef.current) {
+            preRef.current.scrollTop = e.target.scrollTop;
+            preRef.current.scrollLeft = e.target.scrollLeft;
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 export default function Console() {
   const [question, setQuestion] = useState('');
   const [sql, setSql] = useState('');
   const [explanation, setExplanation] = useState('');
   const [source, setSource] = useState(null);
   const [results, setResults] = useState(null);
+  const [elapsed, setElapsed] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState([]);
@@ -62,7 +136,9 @@ export default function Console() {
   async function run(query = sql) {
     setError(null);
     try {
+      const t0 = performance.now();
       const res = await runSuiteQL(query);
+      setElapsed(Math.max(1, Math.round(performance.now() - t0)));
       setResults(res);
     } catch (err) {
       setResults(null);
@@ -70,87 +146,135 @@ export default function Console() {
     }
   }
 
+  const started = Boolean(sql || busy);
+
   return (
     <div className="shell">
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark">◆</span> SuiteSense
+          <span className="brand-logo">
+            <Icon d={I.zap} size={14} />
+          </span>
+          SuiteSense
           <span className="brand-sub">AI SuiteQL Console</span>
         </div>
         <div className="topbar-right">
-          <span className="badge">Demo dataset — runs in your browser</span>
-          <a href="https://github.com/tricksterbivek/suitesense" target="_blank" rel="noreferrer">
+          <span className="status">
+            <span className="status-dot" />
+            demo dataset · in-browser SQLite
+          </span>
+          <a
+            className="gh-link"
+            href="https://github.com/tricksterbivek/suitesense"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="View source on GitHub"
+          >
+            <Icon d={I.github} size={16} />
             GitHub
           </a>
         </div>
       </header>
 
       <main className="console">
-        <div className="console-main">
-        <section className="ask">
-          <label htmlFor="q">Ask a question about your NetSuite data</label>
-          <div className="ask-row">
-            <textarea
-              id="q"
-              rows={2}
-              placeholder="e.g. Top 10 customers by revenue this year"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  generate();
-                }
-              }}
-            />
-            <button className="primary" onClick={() => generate()} disabled={busy || !question.trim()}>
-              {busy ? 'Generating…' : 'Generate SuiteQL'}
-            </button>
-          </div>
-          <div className="chips">
-            {SUGGESTIONS.map((s) => (
-              <button
-                key={s}
-                className="chip"
-                onClick={() => {
-                  setQuestion(s);
-                  generate(s);
+        <div className={started ? 'hero-collapsed' : ''}>
+          {!started && (
+            <section className="hero">
+              <h1>Ask your ERP anything.</h1>
+              <p>Plain English in, runnable SuiteQL out — executed live against a NetSuite-shaped dataset.</p>
+            </section>
+          )}
+
+          <section className="ask">
+            <div className="ask-card">
+              <textarea
+                id="q"
+                rows={started ? 1 : 2}
+                placeholder="e.g. Top 10 customers by revenue this year"
+                aria-label="Ask a question about your NetSuite data"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    generate();
+                  }
                 }}
-              >
-                {s}
+              />
+              <span className="kbd-hint">↵ to run</span>
+              <button className="primary" onClick={() => generate()} disabled={busy || !question.trim()}>
+                <Icon d={I.sparkles} size={14} />
+                {busy ? 'Generating…' : 'Generate'}
               </button>
-            ))}
-          </div>
-        </section>
-
-        {sql && (
-          <section className="panel">
-            <div className="panel-head">
-              <h2>SuiteQL</h2>
-              <div className="panel-meta">
-                {source === 'ai' ? 'Generated by Claude' : source === 'examples' ? 'Curated example (demo mode)' : ''}
-              </div>
-              <button onClick={() => run()}>Run ▸</button>
             </div>
-            <textarea
-              className="sql-editor"
-              rows={Math.min(14, sql.split('\n').length + 1)}
-              value={sql}
-              onChange={(e) => setSql(e.target.value)}
-              spellCheck={false}
-            />
-            {explanation && <p className="explanation">{explanation}</p>}
+            <div className="chips">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  className="chip"
+                  disabled={busy}
+                  onClick={() => {
+                    setQuestion(s);
+                    generate(s);
+                  }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </section>
-        )}
 
-        {error && <div className="error">{error}</div>}
+          {busy && (
+            <div className="skeleton" role="status" aria-label="Generating query">
+              <div className="line" style={{ width: '38%' }} />
+              <div className="line" style={{ width: '82%' }} />
+              <div className="line" style={{ width: '64%' }} />
+              <div className="line" style={{ width: '71%', marginBottom: 0 }} />
+            </div>
+          )}
 
-        {results && <ResultsPanel results={results} />}
+          {sql && !busy && (
+            <section className="panel">
+              <div className="panel-head">
+                <h2>
+                  <Icon d={I.db} />
+                  SuiteQL
+                </h2>
+                <div className="panel-meta">
+                  {source === 'ai' && <span className="source-badge">Claude</span>}
+                  {source === 'examples' && <span className="source-badge examples">Curated</span>}
+                </div>
+                <button onClick={() => run()} aria-label="Run query">
+                  <Icon d={I.play} size={13} />
+                  Run
+                </button>
+              </div>
+              <SqlEditor value={sql} onChange={setSql} />
+              {explanation && (
+                <p className="explanation">
+                  <Icon d={I.sparkles} size={13} />
+                  {explanation}
+                </p>
+              )}
+            </section>
+          )}
+
+          {error && (
+            <div className="errorbox" role="alert">
+              <Icon d={I.alert} size={16} />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {results && !busy && <ResultsPanel results={results} elapsed={elapsed} />}
         </div>
 
         <aside className="sidebar">
           <div className="side-block">
-            <h3>Schema</h3>
+            <h3>
+              <Icon d={I.db} size={12} />
+              Schema
+            </h3>
             {TABLES.map((t) => (
               <details key={t.name}>
                 <summary>{t.name}</summary>
@@ -168,7 +292,10 @@ export default function Console() {
 
           {history.length > 0 && (
             <div className="side-block">
-              <h3>Recent</h3>
+              <h3>
+                <Icon d={I.clock} size={12} />
+                Recent
+              </h3>
               {history.map((h) => (
                 <button
                   key={h.question}
@@ -189,6 +316,13 @@ export default function Console() {
           )}
         </aside>
       </main>
+
+      <footer className="foot">
+        <span>
+          Built by <a href="https://bivek-shah.vercel.app">Bivek Shah</a> — queries never leave your browser.
+        </span>
+        <a href="https://github.com/tricksterbivek/suitesense">Source on GitHub</a>
+      </footer>
     </div>
   );
 }
@@ -204,7 +338,7 @@ function isChartable(columns, rows) {
   );
 }
 
-function ResultsPanel({ results }) {
+function ResultsPanel({ results, elapsed }) {
   const { columns, rows } = results;
   const chartable = isChartable(columns, rows);
   const [view, setView] = useState('table');
@@ -213,10 +347,15 @@ function ResultsPanel({ results }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Results</h2>
-        <div className="panel-meta">{rows.length} rows</div>
+        <h2>
+          <Icon d={activeView === 'chart' ? I.chart : I.table} />
+          Results
+        </h2>
+        <div className="panel-meta" aria-live="polite">
+          {rows.length} rows{elapsed ? ` · ${elapsed} ms` : ''}
+        </div>
         {chartable && (
-          <div className="view-toggle">
+          <div className="view-toggle" role="tablist" aria-label="Result view">
             <button className={activeView === 'table' ? 'active' : ''} onClick={() => setView('table')}>
               Table
             </button>
@@ -245,6 +384,7 @@ function BarChart({ columns, rows }) {
             <div
               className={`chart-bar${row[valueIndex] < 0 ? ' negative' : ''}`}
               style={{ width: `${(Math.abs(row[valueIndex]) / max) * 100}%` }}
+              title={`${row[0]}: ${formatCell(row[valueIndex])}`}
             />
           </div>
           <div className="chart-value">{formatCell(row[valueIndex])}</div>
@@ -259,13 +399,16 @@ function BarChart({ columns, rows }) {
 
 function ResultsTable({ columns, rows }) {
   if (columns.length === 0) return <p className="explanation">No rows returned.</p>;
+  const numeric = columns.map((_, j) => rows.every((r) => typeof r[j] === 'number' || r[j] == null));
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            {columns.map((c) => (
-              <th key={c}>{c}</th>
+            {columns.map((c, j) => (
+              <th key={c} className={numeric[j] ? 'num' : ''}>
+                {c}
+              </th>
             ))}
           </tr>
         </thead>
@@ -273,7 +416,9 @@ function ResultsTable({ columns, rows }) {
           {rows.slice(0, 200).map((row, i) => (
             <tr key={i}>
               {row.map((cell, j) => (
-                <td key={j}>{formatCell(cell)}</td>
+                <td key={j} className={numeric[j] ? 'num' : ''}>
+                  {formatCell(cell)}
+                </td>
               ))}
             </tr>
           ))}
