@@ -107,16 +107,72 @@ export default function Console() {
 
         {error && <div className="error">{error}</div>}
 
-        {results && (
-          <section className="panel">
-            <div className="panel-head">
-              <h2>Results</h2>
-              <div className="panel-meta">{results.rows.length} rows</div>
-            </div>
-            <ResultsTable columns={results.columns} rows={results.rows} />
-          </section>
-        )}
+        {results && <ResultsPanel results={results} />}
       </main>
+    </div>
+  );
+}
+
+// Chartable when there are 2-3 columns, the first is a label and the last is numeric.
+function isChartable(columns, rows) {
+  return (
+    columns.length >= 2 &&
+    columns.length <= 3 &&
+    rows.length >= 2 &&
+    rows.length <= 40 &&
+    rows.every((r) => typeof r[r.length - 1] === 'number')
+  );
+}
+
+function ResultsPanel({ results }) {
+  const { columns, rows } = results;
+  const chartable = isChartable(columns, rows);
+  const [view, setView] = useState('table');
+  const activeView = chartable ? view : 'table';
+
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2>Results</h2>
+        <div className="panel-meta">{rows.length} rows</div>
+        {chartable && (
+          <div className="view-toggle">
+            <button className={activeView === 'table' ? 'active' : ''} onClick={() => setView('table')}>
+              Table
+            </button>
+            <button className={activeView === 'chart' ? 'active' : ''} onClick={() => setView('chart')}>
+              Chart
+            </button>
+          </div>
+        )}
+      </div>
+      {activeView === 'chart' ? <BarChart columns={columns} rows={rows} /> : <ResultsTable columns={columns} rows={rows} />}
+    </section>
+  );
+}
+
+function BarChart({ columns, rows }) {
+  const valueIndex = rows[0].length - 1;
+  const max = Math.max(...rows.map((r) => Math.abs(r[valueIndex])), 1);
+  return (
+    <div className="chart">
+      {rows.map((row, i) => (
+        <div className="chart-row" key={i}>
+          <div className="chart-label" title={String(row[0])}>
+            {String(row[0])}
+          </div>
+          <div className="chart-track">
+            <div
+              className={`chart-bar${row[valueIndex] < 0 ? ' negative' : ''}`}
+              style={{ width: `${(Math.abs(row[valueIndex]) / max) * 100}%` }}
+            />
+          </div>
+          <div className="chart-value">{formatCell(row[valueIndex])}</div>
+        </div>
+      ))}
+      <div className="chart-caption">
+        {columns[valueIndex]} by {columns[0]}
+      </div>
     </div>
   );
 }
