@@ -149,6 +149,11 @@ export default function Console() {
   const started = Boolean(sql || busy);
 
   return (
+    <>
+    <div className="promo-banner">
+      Live demo — every query runs in your browser, no NetSuite account needed.{' '}
+      <a href="https://github.com/tricksterbivek/suitesense">View the source</a>
+    </div>
     <div className="shell">
       <header className="topbar">
         <div className="brand">
@@ -244,7 +249,7 @@ export default function Console() {
                   {source === 'ai' && <span className="source-badge">Claude</span>}
                   {source === 'examples' && <span className="source-badge examples">Curated</span>}
                 </div>
-                <button onClick={() => run()} aria-label="Run query">
+                <button className="buy" onClick={() => run()} aria-label="Run query">
                   <Icon d={I.play} size={13} />
                   Run
                 </button>
@@ -324,6 +329,7 @@ export default function Console() {
         <a href="https://github.com/tricksterbivek/suitesense">Source on GitHub</a>
       </footer>
     </div>
+    </>
   );
 }
 
@@ -345,7 +351,7 @@ function ResultsPanel({ results, elapsed }) {
   const activeView = chartable ? view : 'table';
 
   return (
-    <section className="panel">
+    <section className="panel elevated">
       <div className="panel-head">
         <h2>
           <Icon d={activeView === 'chart' ? I.chart : I.table} />
