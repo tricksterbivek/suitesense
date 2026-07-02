@@ -1,7 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
+import { EXAMPLES } from '../lib/examples.js';
+import { TABLES } from '../lib/schema.js';
+
+const SUGGESTIONS = EXAMPLES.slice(0, 5).map((e) => e.question);
+const HISTORY_KEY = 'suitesense-history';
 
 export default function Console() {
   const [question, setQuestion] = useState('');
@@ -11,9 +16,26 @@ export default function Console() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState([]);
 
-  async function generate() {
-    if (!question.trim() || busy) return;
+  useEffect(() => {
+    try {
+      setHistory(JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'));
+    } catch {
+      /* ignore corrupt history */
+    }
+  }, []);
+
+  function remember(q, generatedSql) {
+    const entry = { question: q, sql: generatedSql };
+    const next = [entry, ...history.filter((h) => h.question !== q)].slice(0, 12);
+    setHistory(next);
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+  }
+
+  async function generate(fromQuestion) {
+    const q = fromQuestion ?? question;
+    if (!q.trim() || busy) return;
     setBusy(true);
     setError(null);
     setResults(null);
@@ -21,13 +43,14 @@ export default function Console() {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ question: q }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
       setSql(data.sql);
       setExplanation(data.explanation);
       setSource(data.source);
+      remember(q, data.sql);
       await run(data.sql);
     } catch (err) {
       setError(err.message);
@@ -63,6 +86,7 @@ export default function Console() {
       </header>
 
       <main className="console">
+        <div className="console-main">
         <section className="ask">
           <label htmlFor="q">Ask a question about your NetSuite data</label>
           <div className="ask-row">
@@ -79,9 +103,23 @@ export default function Console() {
                 }
               }}
             />
-            <button className="primary" onClick={generate} disabled={busy || !question.trim()}>
+            <button className="primary" onClick={() => generate()} disabled={busy || !question.trim()}>
               {busy ? 'Generating…' : 'Generate SuiteQL'}
             </button>
+          </div>
+          <div className="chips">
+            {SUGGESTIONS.map((s) => (
+              <button
+                key={s}
+                className="chip"
+                onClick={() => {
+                  setQuestion(s);
+                  generate(s);
+                }}
+              >
+                {s}
+              </button>
+            ))}
           </div>
         </section>
 
@@ -108,6 +146,48 @@ export default function Console() {
         {error && <div className="error">{error}</div>}
 
         {results && <ResultsPanel results={results} />}
+        </div>
+
+        <aside className="sidebar">
+          <div className="side-block">
+            <h3>Schema</h3>
+            {TABLES.map((t) => (
+              <details key={t.name}>
+                <summary>{t.name}</summary>
+                <ul>
+                  {t.columns.map((c) => (
+                    <li key={c.name}>
+                      <span className="col-name">{c.name}</span>
+                      <span className="col-type">{c.type}</span>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            ))}
+          </div>
+
+          {history.length > 0 && (
+            <div className="side-block">
+              <h3>Recent</h3>
+              {history.map((h) => (
+                <button
+                  key={h.question}
+                  className="history-item"
+                  title={h.question}
+                  onClick={() => {
+                    setQuestion(h.question);
+                    setSql(h.sql);
+                    setExplanation('');
+                    setSource('history');
+                    run(h.sql);
+                  }}
+                >
+                  {h.question}
+                </button>
+              ))}
+            </div>
+          )}
+        </aside>
       </main>
     </div>
   );
