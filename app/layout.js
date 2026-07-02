@@ -1,9 +1,11 @@
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { Montserrat, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
-const inter = Inter({
+// Optimistic VF is Meta-proprietary; Montserrat is the design system's
+// documented first fallback and carries the same humanist-geometric voice.
+const sans = Montserrat({
   subsets: ['latin'],
-  weight: ['400', '500', '600', '700'],
+  weight: ['300', '400', '500', '700'],
   variable: '--font-sans',
   display: 'swap',
 });
@@ -23,7 +25,7 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body>{children}</body>
     </html>
   );
