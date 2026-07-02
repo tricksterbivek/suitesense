@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.env
+.env.local
+.vercel
+public/sql-wasm.wasm
+.DS_Store
