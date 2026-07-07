@@ -38,7 +38,6 @@ const I = {
   chart: ['M3 3v18h18', 'M8 17V9', 'M13 17V5', 'M18 17v-7'],
   clock: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z', 'M12 6v6l4 2'],
   alert: ['M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4', 'M12 17h.01'],
-  github: ['M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.4 5.4 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65S8.93 17.38 9 18v4'],
   zap: ['M13 2L3 14h9l-1 8 10-12h-9l1-8z'],
 };
 
@@ -151,8 +150,7 @@ export default function Console() {
   return (
     <>
     <div className="promo-banner">
-      Live demo — every query runs in your browser, no NetSuite account needed.{' '}
-      <a href="https://github.com/tricksterbivek/suitesense">View the source</a>
+      Live demo — every query runs in your browser, no NetSuite account needed.
     </div>
     <div className="shell">
       <header className="topbar">
@@ -168,16 +166,6 @@ export default function Console() {
             <span className="status-dot" />
             demo dataset · in-browser SQLite
           </span>
-          <a
-            className="gh-link"
-            href="https://github.com/tricksterbivek/suitesense"
-            target="_blank"
-            rel="noreferrer"
-            aria-label="View source on GitHub"
-          >
-            <Icon d={I.github} size={16} />
-            GitHub
-          </a>
         </div>
       </header>
 
@@ -324,9 +312,8 @@ export default function Console() {
 
       <footer className="foot">
         <span>
-          Built by <a href="https://bivek-shah.vercel.app">Bivek Shah</a> — queries never leave your browser.
+          Built by <a href="https://www.linkedin.com/in/bivekshah/" target="_blank" rel="noreferrer">Bivek Shah</a> — queries never leave your browser.
         </span>
-        <a href="https://github.com/tricksterbivek/suitesense">Source on GitHub</a>
       </footer>
     </div>
     </>
