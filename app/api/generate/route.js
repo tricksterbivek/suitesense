@@ -39,7 +39,7 @@ export async function POST(request) {
     const example = matchExample(question);
     return Response.json({
       sql: example.sql,
-      explanation: `Closest curated example: "${example.question}". Add an ANTHROPIC_API_KEY for live AI generation.`,
+      explanation: '',
       source: 'examples',
     });
   }
