@@ -45,7 +45,7 @@ is genuine SuiteQL that transfers to a live account.
 ## Stack
 
 - **Next.js 15** (App Router, plain JavaScript)
-- **Claude API** — `claude-opus-4-8`, adaptive thinking, structured JSON output
+- **Claude API** — (Optional )  `claude-opus-4-8`, adaptive thinking, structured JSON output
 - **sql.js** — SQLite compiled to wasm, seeded in the browser
 - Zero CSS/chart libraries — hand-rolled dark theme, CSS-only bar charts
 
@@ -53,7 +53,7 @@ is genuine SuiteQL that transfers to a live account.
 
 ```sh
 npm install
-cp .env.example .env.local   # add ANTHROPIC_API_KEY for live AI generation
+cp .env.example .env.local   # add ANTHROPIC_API_KEY for live AI generation (Optional) 
 npm run dev
 ```
 
