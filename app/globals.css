@@ -157,6 +157,24 @@ body {
   background: var(--success);
 }
 
+.byline {
+  color: var(--ink-deep);
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.14px;
+  border: 2px solid rgba(10, 19, 23, 0.12);
+  border-radius: var(--r-full);
+  padding: 8px 18px;
+  transition: border-color 0.2s var(--ease);
+}
+
+.byline:hover {
+  border-color: var(--ink-deep);
+}
+
 /* ---------- layout ---------- */
 
 .console {

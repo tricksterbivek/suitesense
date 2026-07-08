@@ -166,6 +166,14 @@ export default function Console() {
             <span className="status-dot" />
             demo dataset · in-browser SQLite
           </span>
+          <a
+            className="byline"
+            href="https://www.linkedin.com/in/bivekshah/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Built by Bivek Shah
+          </a>
         </div>
       </header>
 
@@ -234,7 +242,7 @@ export default function Console() {
                   SuiteQL
                 </h2>
                 <div className="panel-meta">
-                  {source === 'ai' && <span className="source-badge">Claude</span>}
+                  {source === 'ai' && <span className="source-badge">AI</span>}
                   {source === 'examples' && <span className="source-badge examples">Curated</span>}
                 </div>
                 <button className="buy" onClick={() => run()} aria-label="Run query">
