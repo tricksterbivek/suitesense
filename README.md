@@ -33,14 +33,14 @@ names every time. SuiteSense turns the question straight into a runnable query.
 
 The public demo never touches a real NetSuite account. Queries execute against
 a **seeded, deterministic SQLite database running entirely in your browser**
-(sql.js/wasm) whose 17 tables mirror the real NetSuite analytics schema —
+(sql.js/wasm) whose 15 tables mirror the real NetSuite analytics schema —
 transactions and lines (AR **and** AP), the GL layer
 (`transactionaccountingline`, `account`, `accountingperiod`), entities
-(`customer`, `vendor`, `employee`), items and `inventorybalance`, dimensions
-(`subsidiary`, `location`, `department`, `classification`, `currency`), plus
-`systemnote` and a `customrecord_*` example. Generated SuiteQL is bridged to
-SQLite by a small dialect translator, so the SQL you see is genuine SuiteQL
-that transfers to a live account.
+(`customer`, `vendor`, `employee`), items and `inventorybalance`, and
+dimensions (`subsidiary`, `location`, `department`, `classification`,
+`currency`). Generated SuiteQL is bridged to SQLite by a small dialect
+translator, so the SQL you see is genuine SuiteQL that transfers to a live
+account.
 
 - Read-only guard: anything except `SELECT` is rejected client-side.
 - No key configured? `/api/generate` falls back to a curated example library,
