@@ -722,6 +722,15 @@ tbody tr:hover {
   color: var(--steel);
 }
 
+.family-label {
+  margin: 0.75rem 0 0.2rem;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--steel);
+}
+
 .side-block details summary {
   cursor: pointer;
   font-family: var(--mono);

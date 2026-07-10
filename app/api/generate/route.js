@@ -10,12 +10,13 @@ Rules:
 - SuiteQL is Oracle-flavoured: use FETCH FIRST n ROWS ONLY (not LIMIT), NVL, TO_CHAR, ADD_MONTHS, SYSDATE.
 - Prefer ANSI JOIN syntax. Avoid BUILTIN.* functions — this console targets a portable subset.
 - Alias aggregate columns with clear lowercase names.
+- Orders (SalesOrd, PurchOrd) never post to the GL: transactionaccountingline only has rows with posting = 'T'.
 
 Schema:
 ${schemaPromptText()}
 
 Examples:
-${EXAMPLES.slice(0, 4)
+${EXAMPLES.filter((e) => e.fewshot)
   .map((e) => `Q: ${e.question}\nSQL:\n${e.sql}`)
   .join('\n\n')}`;
 

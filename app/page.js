@@ -276,18 +276,23 @@ export default function Console() {
               <Icon d={I.db} size={12} />
               Schema
             </h3>
-            {TABLES.map((t) => (
-              <details key={t.name}>
-                <summary>{t.name}</summary>
-                <ul>
-                  {t.columns.map((c) => (
-                    <li key={c.name}>
-                      <span className="col-name">{c.name}</span>
-                      <span className="col-type">{c.type}</span>
-                    </li>
-                  ))}
-                </ul>
-              </details>
+            {[...new Set(TABLES.map((t) => t.family))].map((family) => (
+              <div key={family}>
+                <p className="family-label">{family}</p>
+                {TABLES.filter((t) => t.family === family).map((t) => (
+                  <details key={t.name}>
+                    <summary>{t.name}</summary>
+                    <ul>
+                      {t.columns.map((c) => (
+                        <li key={c.name}>
+                          <span className="col-name">{c.name}</span>
+                          <span className="col-type">{c.type}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                ))}
+              </div>
             ))}
           </div>
 
