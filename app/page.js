@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
 import { EXAMPLES } from '../lib/examples.js';
@@ -93,6 +94,8 @@ export default function Console() {
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState([]);
   const [copied, setCopied] = useState(false);
+  const [warnings, setWarnings] = useState([]);
+  const [repaired, setRepaired] = useState(false);
   const copyTimer = useRef(null);
 
   async function copySql() {
@@ -138,6 +141,8 @@ export default function Console() {
       setSql(data.sql);
       setExplanation(data.explanation);
       setSource(data.source);
+      setWarnings(data.warnings || []);
+      setRepaired(!!data.repaired);
       remember(q, data.sql);
       await run(data.sql);
     } catch (err) {
@@ -181,6 +186,7 @@ export default function Console() {
             <span className="status-dot" />
             demo dataset · in-browser SQLite
           </span>
+          <Link className="byline" href="/library">Query Library</Link>
           <a
             className="byline"
             href="https://www.linkedin.com/in/bivekshah/"
@@ -258,6 +264,8 @@ export default function Console() {
                 </h2>
                 <div className="panel-meta">
                   {source === 'ai' && <span className="source-badge">AI</span>}
+                  {source === 'ai' && repaired && <span className="source-badge examples">auto-corrected</span>}
+                  {source === 'library' && <span className="source-badge examples">Verified library</span>}
                   {source === 'examples' && <span className="source-badge examples">Curated</span>}
                 </div>
                 <button onClick={copySql} aria-label="Copy SuiteQL to clipboard">
@@ -275,6 +283,16 @@ export default function Console() {
                   <Icon d={I.sparkles} size={13} />
                   {explanation}
                 </p>
+              )}
+              {warnings.length > 0 && (
+                <ul className="warnings" aria-label="Query validation notes">
+                  {warnings.map((w, i) => (
+                    <li key={i} className={`warn warn-${w.severity}`}>
+                      <Icon d={I.alert} size={13} />
+                      <span><strong>{w.message}.</strong> {w.fix}</span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </section>
           )}

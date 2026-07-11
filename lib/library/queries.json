@@ -1,0 +1,171 @@
+{
+  "_comment": "Verified SuiteQL query library. Every entry was executed successfully against a real NetSuite account (used only for testing) and targets REAL NetSuite analytics tables — not the demo's simplified schema. The generation layer retrieves and adapts these before writing SQL from scratch. `sql` uses :param placeholders the model substitutes. No account-specific data is stored here; sample_shape shows column names only.",
+  "verified_dialect": "NetSuite SuiteQL (Oracle-flavoured). Supports TO_DATE, TO_CHAR, TRUNC, ADD_MONTHS, SYSDATE, NVL, FETCH FIRST n ROWS ONLY, BUILTIN.DF. OFFSET is unreliable — page with rowBegin/rowEnd instead.",
+  "queries": [
+    {
+      "id": "REV-001",
+      "category": "revenue",
+      "intent": "Total or period revenue from the general ledger (canonical, avoids line-sign and tax traps)",
+      "keywords": ["revenue", "income", "sales", "total", "how much", "made", "earned", "turnover"],
+      "sql": "SELECT ap.periodname AS period, SUM(tal.credit - tal.debit) AS revenue\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n  AND a.accttype = 'Income'\n  AND ap.isadjust = 'F'\n  AND ap.startdate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate\nORDER BY ap.startdate",
+      "sample_shape": ["period", "revenue"],
+      "joins": ["transactionaccountingline->transaction", "->account (accttype)", "->accountingperiod (postingperiod)"],
+      "caveats": "Revenue is credit-signed, so credit - debit is positive. posting='T' excludes non-posting orders. isadjust='F' drops period-rollup rows. This is the most robust 'revenue' definition; use REV-002 only when the user explicitly wants item/line detail.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "REV-002",
+      "category": "revenue",
+      "intent": "Revenue broken down by item / product, at the line level",
+      "keywords": ["revenue", "by item", "by product", "sku", "best selling", "top items", "product line", "units sold"],
+      "sql": "SELECT i.itemid, i.displayname,\n       SUM(-tl.netamount) AS revenue,\n       SUM(-tl.quantity) AS units\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'CustInvc'\n  AND tl.mainline = 'F'\n  AND tl.taxline = 'F'\n  AND i.itemtype IN ('InvtPart', 'NonInvtPart', 'Assembly', 'Service', 'Kit')\n  AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY i.itemid, i.displayname\nORDER BY revenue DESC\nFETCH FIRST :n ROWS ONLY",
+      "sample_shape": ["itemid", "displayname", "revenue", "units"],
+      "joins": ["transactionline->transaction", "->item (itemtype)"],
+      "caveats": "CRITICAL: sales item lines have NEGATIVE netamount and quantity, so negate them (-tl.netamount). mainline='F' drops the header total row; taxline='F' drops tax lines; the itemtype filter drops Subtotal/Markup/Discount pseudo-lines. Without all of these the numbers are wrong and 'best selling' sorts backwards.",
+      "difficulty": "hard"
+    },
+    {
+      "id": "REV-003",
+      "category": "revenue",
+      "intent": "Simple invoiced total from transaction headers (includes tax; fast)",
+      "keywords": ["invoiced", "total invoiced", "billed", "invoice total"],
+      "sql": "SELECT SUM(t.foreigntotal) AS invoiced_total\nFROM transaction t\nWHERE t.type = 'CustInvc'\n  AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')",
+      "sample_shape": ["invoiced_total"],
+      "joins": [],
+      "caveats": "foreigntotal is the header total in the transaction's own currency and is tax-INCLUSIVE. Use for 'total invoiced'; use REV-001 for true (tax-exclusive, GL) revenue. Do not multiply by exchangerate unless consolidating (see CUR-001).",
+      "difficulty": "easy"
+    },
+    {
+      "id": "REV-004",
+      "category": "revenue",
+      "intent": "Monthly revenue trend from the GL",
+      "keywords": ["monthly", "trend", "by month", "over time", "month"],
+      "sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') AS month, SUM(tal.credit - tal.debit) AS revenue\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n  AND a.accttype = 'Income'\n  AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -12)\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY month",
+      "sample_shape": ["month", "revenue"],
+      "joins": ["transactionaccountingline->transaction", "->account"],
+      "caveats": "Groups by transaction date. For posting-period grouping join accountingperiod on t.postingperiod instead (see PERIOD-001).",
+      "difficulty": "medium"
+    },
+    {
+      "id": "AR-001",
+      "category": "ar-aging",
+      "intent": "Open accounts-receivable balance by customer (who owes us)",
+      "keywords": ["owe", "owes", "outstanding", "open balance", "receivable", "ar", "unpaid", "open invoices"],
+      "sql": "SELECT c.companyname, SUM(t.foreignamountunpaid) AS open_ar\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n  AND t.foreignamountunpaid > 0\nGROUP BY c.companyname\nHAVING SUM(t.foreignamountunpaid) > :threshold\nORDER BY open_ar DESC",
+      "sample_shape": ["companyname", "open_ar"],
+      "joins": ["transaction->customer (entity)"],
+      "caveats": "CRITICAL: open balance = foreignamountunpaid, NOT foreigntotal. 'Open' invoices are those with foreignamountunpaid > 0 — do NOT filter status = 'open' (status is a raw code, not that word). entity joins customer for AR types.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "AR-002",
+      "category": "ar-aging",
+      "intent": "AR aging buckets (current / 1-30 / 31-60 / 61-90 / 90+) by amount",
+      "keywords": ["aging", "ageing", "buckets", "30 60 90", "overdue", "past due"],
+      "sql": "SELECT CASE\n         WHEN t.duedate >= TRUNC(SYSDATE) THEN 'current'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 30 THEN '1-30'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 60 THEN '31-60'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 90 THEN '61-90'\n         ELSE '90+'\n       END AS bucket,\n       COUNT(*) AS invoices,\n       SUM(t.foreignamountunpaid) AS amount\nFROM transaction t\nWHERE t.type = 'CustInvc'\n  AND t.foreignamountunpaid > 0\nGROUP BY CASE\n         WHEN t.duedate >= TRUNC(SYSDATE) THEN 'current'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 30 THEN '1-30'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 60 THEN '31-60'\n         WHEN t.duedate >= TRUNC(SYSDATE) - 90 THEN '61-90'\n         ELSE '90+'\n       END",
+      "sample_shape": ["bucket", "invoices", "amount"],
+      "joins": [],
+      "caveats": "Aging is measured from duedate against SYSDATE. The CASE must be repeated verbatim in GROUP BY (SuiteQL has no GROUP BY alias). Uses foreignamountunpaid for the outstanding amount.",
+      "difficulty": "hard"
+    },
+    {
+      "id": "GL-001",
+      "category": "pnl-gl",
+      "intent": "Account balance for a given accounting period",
+      "keywords": ["balance", "account", "gl", "ledger", "account balance"],
+      "sql": "SELECT a.acctnumber, a.fullname, SUM(tal.amount) AS balance\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n  AND ap.periodname = :period\n  AND ap.isadjust = 'F'\n  AND a.acctnumber = :acctnumber\nGROUP BY a.acctnumber, a.fullname",
+      "sample_shape": ["acctnumber", "fullname", "balance"],
+      "joins": ["transactionaccountingline->transaction", "->account", "->accountingperiod"],
+      "caveats": "tal.amount is the signed GL amount (debit positive, credit negative). Join accountingperiod on t.postingperiod, not trandate. isadjust='F' avoids double counting adjustment rows.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "GL-002",
+      "category": "pnl-gl",
+      "intent": "Profit & loss (income, expenses, net) by month",
+      "keywords": ["profit", "loss", "p&l", "pnl", "net income", "expenses", "net"],
+      "sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') AS month,\n       SUM(CASE WHEN a.accttype = 'Income' THEN tal.credit - tal.debit ELSE 0 END) AS income,\n       SUM(CASE WHEN a.accttype IN ('COGS', 'Expense', 'OthExpense') THEN tal.debit - tal.credit ELSE 0 END) AS expenses,\n       SUM(CASE WHEN a.accttype = 'Income' THEN tal.credit - tal.debit\n                WHEN a.accttype IN ('COGS', 'Expense', 'OthExpense') THEN -(tal.debit - tal.credit)\n                ELSE 0 END) AS net\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n  AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY month",
+      "sample_shape": ["month", "income", "expenses", "net"],
+      "joins": ["transactionaccountingline->transaction", "->account (accttype)"],
+      "caveats": "Income accounts are credit-positive (credit-debit); expense accounts are debit-positive (debit-credit). posting='T' only.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "AP-001",
+      "category": "ap-vendor",
+      "intent": "Vendor spend from vendor bills",
+      "keywords": ["vendor", "spend", "supplier", "bought", "purchases", "ap", "payable"],
+      "sql": "SELECT v.companyname, SUM(-t.foreigntotal) AS spend\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'VendBill'\n  AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.companyname\nORDER BY spend DESC\nFETCH FIRST :n ROWS ONLY",
+      "sample_shape": ["companyname", "spend"],
+      "joins": ["transaction->vendor (entity)"],
+      "caveats": "Vendor-bill foreigntotal is credit-signed (negative), so negate it for a positive spend figure. entity joins vendor for AP types.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "AP-002",
+      "category": "ap-vendor",
+      "intent": "Open vendor bills (what we still owe suppliers)",
+      "keywords": ["open bills", "owe suppliers", "unpaid bills", "accounts payable open"],
+      "sql": "SELECT v.companyname, t.tranid, t.trandate, t.duedate, ABS(t.foreignamountunpaid) AS unpaid\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'VendBill'\n  AND t.foreignamountunpaid <> 0\nORDER BY t.duedate",
+      "sample_shape": ["companyname", "tranid", "trandate", "duedate", "unpaid"],
+      "joins": ["transaction->vendor (entity)"],
+      "caveats": "Bill unpaid amounts are credit-signed; ABS() makes them positive. Filter foreignamountunpaid <> 0 for still-open bills.",
+      "difficulty": "medium"
+    },
+    {
+      "id": "DIM-001",
+      "category": "dimension",
+      "intent": "Revenue by subsidiary (multi-subsidiary segmentation)",
+      "keywords": ["subsidiary", "by subsidiary", "entity", "legal entity", "oneworld"],
+      "sql": "SELECT BUILTIN.DF(tl.subsidiary) AS subsidiary, SUM(-tl.netamount) AS revenue\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nWHERE t.type = 'CustInvc'\n  AND tl.mainline = 'F'\n  AND tl.taxline = 'F'\nGROUP BY BUILTIN.DF(tl.subsidiary)\nORDER BY revenue DESC",
+      "sample_shape": ["subsidiary", "revenue"],
+      "joins": ["transactionline->transaction"],
+      "caveats": "CRITICAL: transaction.subsidiary is NOT_EXPOSED for SuiteQL and errors. Use transactionline.subsidiary instead. BUILTIN.DF() turns the internal id into the subsidiary name.",
+      "difficulty": "hard"
+    },
+    {
+      "id": "DIM-002",
+      "category": "dimension",
+      "intent": "Revenue by department or class (line-level dimensions)",
+      "keywords": ["department", "class", "division", "by department", "by class", "segment"],
+      "sql": "SELECT BUILTIN.DF(tl.department) AS department, SUM(-tl.netamount) AS revenue\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nWHERE t.type = 'CustInvc'\n  AND tl.mainline = 'F'\n  AND tl.taxline = 'F'\n  AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY BUILTIN.DF(tl.department)\nORDER BY revenue DESC",
+      "sample_shape": ["department", "revenue"],
+      "joins": ["transactionline->transaction"],
+      "caveats": "Department/class/location live on the LINE (transactionline), not the header. Filter mainline='F' AND taxline='F' and negate netamount. Swap tl.department for tl.class or tl.location as needed.",
+      "difficulty": "hard"
+    },
+    {
+      "id": "CUR-001",
+      "category": "multi-currency",
+      "intent": "Revenue consolidated to base currency across subsidiaries",
+      "keywords": ["currency", "consolidated", "base currency", "converted", "exchange", "aud", "usd"],
+      "sql": "SELECT BUILTIN.DF(tl.subsidiary) AS subsidiary,\n       SUM(-tl.netamount) AS revenue_txn_currency,\n       SUM(-tl.netamount * t.exchangerate) AS revenue_base\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nWHERE t.type = 'CustInvc'\n  AND tl.mainline = 'F'\n  AND tl.taxline = 'F'\nGROUP BY BUILTIN.DF(tl.subsidiary)\nORDER BY revenue_base DESC",
+      "sample_shape": ["subsidiary", "revenue_txn_currency", "revenue_base"],
+      "joins": ["transactionline->transaction"],
+      "caveats": "t.exchangerate converts the transaction's own currency to ITS subsidiary's base currency — it is NOT a single global rate. Summing base amounts across subsidiaries with different base currencies is only meaningful if they share one; otherwise report per-subsidiary and state the assumption. For true consolidated reporting NetSuite uses consolidatedexchangerate.",
+      "difficulty": "hard"
+    },
+    {
+      "id": "INV-001",
+      "category": "inventory",
+      "intent": "Available stock on hand per item and location",
+      "keywords": ["inventory", "stock", "on hand", "available", "quantity", "warehouse"],
+      "sql": "SELECT BUILTIN.DF(inv.item) AS item, BUILTIN.DF(inv.location) AS location,\n       SUM(inv.quantityonhand) AS on_hand,\n       SUM(inv.quantityavailable) AS available\nFROM inventorybalance inv\nGROUP BY BUILTIN.DF(inv.item), BUILTIN.DF(inv.location)\nHAVING SUM(inv.quantityavailable) < :threshold\nORDER BY available",
+      "sample_shape": ["item", "location", "on_hand", "available"],
+      "joins": ["inventorybalance (self)"],
+      "caveats": "inventorybalance holds quantityonhand and quantityavailable per item/location. BUILTIN.DF resolves item/location ids to names without extra joins. Drop the HAVING for a full stock list.",
+      "difficulty": "easy"
+    },
+    {
+      "id": "TXN-001",
+      "category": "status",
+      "intent": "Filter or display transaction status correctly",
+      "keywords": ["status", "open", "paid", "pending", "approved", "state"],
+      "sql": "SELECT t.tranid, BUILTIN.DF(t.status) AS status_label, t.foreignamountunpaid\nFROM transaction t\nWHERE t.type = 'CustInvc'\n  AND t.foreignamountunpaid > 0\nORDER BY t.trandate DESC\nFETCH FIRST :n ROWS ONLY",
+      "sample_shape": ["tranid", "status_label", "foreignamountunpaid"],
+      "joins": [],
+      "caveats": "transaction.status stores a raw per-type code (e.g. CustInvc 'A'=Open, 'B'=Paid In Full) — never filter status = 'open'. Use BUILTIN.DF(t.status) to DISPLAY the label, and business fields (foreignamountunpaid > 0 for open) to FILTER.",
+      "difficulty": "medium"
+    }
+  ]
+}
