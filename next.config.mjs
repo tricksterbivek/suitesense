@@ -1,5 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // sql.js's UMD wrapper breaks when bundled into the server build — load it
+  // natively from node_modules at runtime instead (its dist/ files get traced
+  // into the function bundle, including the wasm the execution gate reads).
+  serverExternalPackages: ['sql.js'],
   // sql.js probes for node 'fs' at bundle time; in the BROWSER bundle it only
   // runs on wasm, so stub the node builtins there. The server keeps real fs
   // (the generate route's execution gate reads the wasm from disk).
