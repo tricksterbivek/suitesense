@@ -20,6 +20,12 @@ const I = {
 const WORD = /[a-z0-9]+/g;
 const toks = (s) => (s.toLowerCase().match(WORD) || []);
 
+const AREAS = [
+  { key: 'all', label: 'all' },
+  { key: 'finance', label: 'finance' },
+  { key: 'supply-chain', label: 'supply chain' },
+];
+
 export default function LibraryBrowser({ queries, categories }) {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('all');
@@ -29,12 +35,12 @@ export default function LibraryBrowser({ queries, categories }) {
   const filtered = useMemo(() => {
     const words = [...new Set(toks(q))];
     return queries
-      .filter((e) => cat === 'all' || e.category === cat)
+      .filter((e) => cat === 'all' || e.area === cat)
       .map((e) => {
         if (!words.length) return { e, s: 1 };
         // weighted, exact-keyword-first (mirrors the server-side retriever)
         const kw = new Set(e.keywords.flatMap(toks));
-        const intent = new Set([...toks(e.intent), ...toks(e.category)]);
+        const intent = new Set([...toks(e.intent), ...toks(e.category), ...toks(e.question || ''), ...toks(e.scenario || '')]);
         const body = new Set(toks(e.sql));
         let s = 0;
         for (const w of words) {
@@ -89,12 +95,9 @@ export default function LibraryBrowser({ queries, categories }) {
           />
         </div>
         <div className="lib-cats">
-          <button className={cat === 'all' ? 'lib-cat on' : 'lib-cat'} onClick={() => setCat('all')}>
-            all <span>{queries.length}</span>
-          </button>
-          {categories.map((c) => (
-            <button key={c} className={cat === c ? 'lib-cat on' : 'lib-cat'} onClick={() => setCat(c)}>
-              {c} <span>{queries.filter((e) => e.category === c).length}</span>
+          {AREAS.map((a) => (
+            <button key={a.key} className={cat === a.key ? 'lib-cat on' : 'lib-cat'} onClick={() => setCat(a.key)}>
+              {a.label} <span>{a.key === 'all' ? queries.length : queries.filter((e) => e.area === a.key).length}</span>
             </button>
           ))}
         </div>
@@ -110,7 +113,7 @@ export default function LibraryBrowser({ queries, categories }) {
                 role="option"
                 aria-selected={activeId === e.id}
               >
-                <span className="lib-item-intent">{e.intent}</span>
+                <span className="lib-item-intent">{e.question || e.intent}</span>
                 <span className="lib-item-meta">
                   <span className="lib-tag">{e.category}</span>
                   <span className={`lib-diff d-${e.difficulty}`}>{e.difficulty}</span>
@@ -130,7 +133,9 @@ export default function LibraryBrowser({ queries, categories }) {
                   <Icon d={I.shield} size={13} /> Verified
                 </span>
               </div>
-              <h2>{selected.intent}</h2>
+              <h2>{selected.question || selected.intent}</h2>
+              {selected.scenario && <p className="lib-scenario">{selected.scenario}</p>}
+              <p className="lib-intent">{selected.intent}</p>
             </div>
 
             <div className="lib-sqlwrap">

@@ -981,3 +981,6 @@ tbody tr:hover {
   padding: 0.6rem 0.8rem;
 }
 .live-note svg { margin-top: 2px; flex: none; color: var(--primary); }
+
+.lib-scenario { font-size: 14px; line-height: 1.55; color: var(--slate); margin-top: 0.4rem; }
+.lib-intent { font-family: var(--mono); font-size: 12px; color: var(--steel); margin-top: 0.35rem; }
