@@ -1,0 +1,95 @@
+{
+  "_comment": "Known failure patterns observed when generating SuiteQL against real NetSuite. Each entry is a negative example: the wrong pattern, why it fails, and the verified fix (usually pointing at a queries.json entry). Used three ways: (1) injected into the generation prompt as 'do not do this'; (2) as rules the server-side validator enforces; (3) shown in the library UI so users learn the traps.",
+  "failures": [
+    {
+      "id": "F-STATUS-WORD",
+      "trap": "Filtering transaction.status with a human word",
+      "wrong": "WHERE t.status = 'open'   -- or 'paid', 'pendingFulfillment'",
+      "why": "transaction.status stores a raw per-type code (CustInvc 'A'=Open, 'B'=Paid In Full; each type has its own letters). The word 'open' matches nothing, so the query silently returns zero rows and reads as a true 'nothing is open' answer.",
+      "fix": "Filter on the business fact instead: foreignamountunpaid > 0 for open AR/AP. Display the label with BUILTIN.DF(t.status). See AR-001, TXN-001.",
+      "severity": "critical",
+      "detect": "\\bstatus\\s*=\\s*'(open|paid|pending|closed|pendingFulfillment|pendingReceipt|approved)'"
+    },
+    {
+      "id": "F-LINE-SIGN",
+      "trap": "Summing transactionline.netamount or quantity without sign handling",
+      "wrong": "SELECT SUM(l.netamount) AS revenue, SUM(l.quantity) AS units FROM transactionline l ...",
+      "why": "On sales transactions item lines carry NEGATIVE netamount and quantity (credit convention). SUM gives negative or nonsensical revenue, and ORDER BY units DESC returns the WORST sellers first. It also includes the header, tax, subtotal and markup lines.",
+      "fix": "Negate: SUM(-l.netamount). Filter mainline='F' AND taxline='F' and restrict itemtype to real products. See REV-002.",
+      "severity": "critical",
+      "detect": null
+    },
+    {
+      "id": "F-NO-MAINLINE",
+      "trap": "Aggregating transactionline without a mainline / taxline filter",
+      "wrong": "SELECT SUM(l.netamount) FROM transactionline l JOIN transaction t ON t.id=l.transaction WHERE t.type='CustInvc'",
+      "why": "transactionline contains the header row (mainline='T'), tax lines (taxline='T'), and pseudo-lines (Subtotal, Markup, Discount, COGS) alongside item lines. Summing everything double-counts and mixes grains.",
+      "fix": "Add mainline='F' AND taxline='F', and constrain itemtype for product-level sums. See REV-002, DIM-002.",
+      "severity": "critical",
+      "detect": null
+    },
+    {
+      "id": "F-TXN-SUBSIDIARY",
+      "trap": "Selecting or joining transaction.subsidiary",
+      "wrong": "SELECT t.subsidiary FROM transaction t   -- or JOIN subsidiary s ON s.id = t.subsidiary",
+      "why": "transaction.subsidiary is NOT_EXPOSED for the SuiteQL SEARCH channel and raises 'Field subsidiary for record transaction was not found. NOT_EXPOSED'. The query errors outright.",
+      "fix": "Use transactionline.subsidiary and BUILTIN.DF() for the name. See DIM-001, CUR-001.",
+      "severity": "critical",
+      "detect": null
+    },
+    {
+      "id": "F-OPEN-BALANCE",
+      "trap": "Using foreigntotal as the open/outstanding balance",
+      "wrong": "SELECT SUM(t.foreigntotal) AS open_ar FROM transaction t WHERE t.status='open'",
+      "why": "foreigntotal is the full original invoice amount, not the remaining balance. Combined with the status-word trap it is doubly wrong — it overstates AR and returns zero rows.",
+      "fix": "Use foreignamountunpaid for the outstanding balance and foreignamountunpaid > 0 to select open items. See AR-001, AR-002.",
+      "severity": "critical",
+      "detect": null
+    },
+    {
+      "id": "F-TERRITORY",
+      "trap": "Grouping or filtering by customer.territory as a text region",
+      "wrong": "SELECT c.territory, SUM(...) FROM customer c GROUP BY c.territory   -- 'APAC'/'EMEA'/'AMER'",
+      "why": "customer.territory is frequently unpopulated (all NULL) and is an internal id, not a region word, when present. 'Sales by region' collapses to a single NULL bucket.",
+      "fix": "Segment by a populated dimension: transactionline.subsidiary, .location, or .class. See DIM-001, DIM-002.",
+      "severity": "major",
+      "detect": "\\bterritory\\b"
+    },
+    {
+      "id": "F-VENDOR-SIGN",
+      "trap": "Summing vendor-bill foreigntotal without negating",
+      "wrong": "SELECT SUM(t.foreigntotal) AS spend FROM transaction t WHERE t.type='VendBill' ORDER BY spend DESC",
+      "why": "Vendor-bill header foreigntotal is credit-signed (negative). ORDER BY spend DESC returns the smallest spenders first and totals look negative.",
+      "fix": "Negate: SUM(-t.foreigntotal), or ABS(). See AP-001.",
+      "severity": "major",
+      "detect": null
+    },
+    {
+      "id": "F-PERIOD-ROLLUP",
+      "trap": "Joining accountingperiod without excluding rollup rows",
+      "wrong": "JOIN accountingperiod ap ON ap.id = t.postingperiod   -- no isadjust/isquarter/isyear filter",
+      "why": "accountingperiod includes quarter (isquarter='T'), year (isyear='T') and adjustment (isadjust='T') rollup rows in addition to months. Joining or listing periods without filtering these double-counts or lists ambiguous 'Q1'/'FY' rows.",
+      "fix": "Add ap.isadjust='F' (and isquarter='F' AND isyear='F' when listing month periods). See GL-001, REV-001.",
+      "severity": "major",
+      "detect": null
+    },
+    {
+      "id": "F-OFFSET",
+      "trap": "Paginating with OFFSET",
+      "wrong": "... ORDER BY x OFFSET 100 ROWS FETCH NEXT 50 ROWS ONLY",
+      "why": "OFFSET is unreliable / silently ignored in some SuiteQL execution contexts, returning the first page repeatedly.",
+      "fix": "Use FETCH FIRST n ROWS ONLY for top-N, or paginate with an id/ROWNUM range in the executing tool.",
+      "severity": "minor",
+      "detect": "\\bOFFSET\\s+\\d+\\s+ROWS?\\b"
+    },
+    {
+      "id": "F-CROSS-CURRENCY-SUM",
+      "trap": "Summing foreign amounts across currencies as one number",
+      "wrong": "SELECT SUM(t.foreigntotal) FROM transaction t   -- mixing USD, GBP, AUD",
+      "why": "foreigntotal is in each transaction's own currency; summing across currencies produces a meaningless number presented as one figure.",
+      "fix": "Convert with * t.exchangerate to the subsidiary base, group by subsidiary, and state the consolidation assumption. See CUR-001.",
+      "severity": "major",
+      "detect": null
+    }
+  ]
+}

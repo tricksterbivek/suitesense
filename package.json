@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
     "postinstall": "cp node_modules/sql.js/dist/sql-wasm.wasm public/sql-wasm.wasm",
-    "check": "node lib/translate.test.mjs && node lib/demoData.test.mjs"
+    "check": "node lib/translate.test.mjs && node lib/demoData.test.mjs && node lib/library/retrieval.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

@@ -1,0 +1,828 @@
+{
+  "pipeline": [
+    {
+      "area": "Schema catalog vs real NetSuite \u2014 transactionline semantics",
+      "issue": "The catalog and demo data model transactionline as clean, positive item rows. Real NetSuite transactionline includes the main line, tax lines, shipping and COGS lines (mainline/taxline/accountinglinetype flags \u2014 all absent from the catalog), and on sales transactions the income lines carry NEGATIVE netamount (and typically negative quantity). The prompt never states any of this, and two examples teach SUM(l.netamount) AS revenue with no line-type filter.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:26-39 (transactionline has only id/transaction/item/quantity/rate/netamount/dims \u2014 no mainline, taxline, accountinglinetype; note just says 'in transaction currency'); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.js:281-293 (seeds only positive item lines, no header/tax rows); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:65-72 and 143-149 (few-shot 'best-selling items' and 'revenue by department' do SUM(l.netamount)/SUM(l.quantity) with no mainline='F'/taxline='F' filter); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:5-14 (no sign-convention or line-filter rule).",
+      "impact": "Copied to a live account, these queries return negative or near-zero 'revenue' (income lines negative + main line netting), double-count via tax/shipping rows, and ORDER BY units DESC inverts best-sellers. Numbers look plausible in the demo and dead wrong in production \u2014 the classic silent failure.",
+      "fix_direction": "Add mainline/taxline/accountinglinetype columns and explicit sign-convention notes to the catalog; add a hard prompt rule ('on sales transactions item netamount is negative; always filter mainline=\"F\" AND taxline=\"F\"'); seed the demo with signed data + main/tax rows so the demo actually exercises the real convention; update the two few-shot examples.",
+      "severity": "critical"
+    },
+    {
+      "area": "Schema catalog vs real NetSuite \u2014 transaction.status labels",
+      "issue": "The catalog teaches status as human labels ('open' | 'paid' | 'pendingFulfillment' | 'pendingReceipt' | 'closed') and examples filter on them. Real SuiteQL transaction.status returns internal per-type codes (e.g. 'A'/'B'), with labels only via BUILTIN.DF(status) \u2014 which the prompt explicitly bans.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:14 (status note lists label strings); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.js:136-144 (STATUSES seeds those labels); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:48,116,137 (WHERE t.status = 'open' / 'pendingFulfillment'); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:11 ('Avoid BUILTIN.*' rule removes the one legitimate escape hatch).",
+      "impact": "Every status-filtered query ('open invoices', 'orders pending fulfillment', 'unpaid bills') returns 0 rows in a real account \u2014 the user reads 'no open invoices' as a true answer. This is the highest-traffic query class for AR/AP users.",
+      "fix_direction": "Document real status code semantics per type in the catalog (or add a status-mapping note), scope the BUILTIN ban to the demo translator only (teach BUILTIN.DF for display, code filters for WHERE), and seed the demo with real codes so demo behaviour matches production.",
+      "severity": "critical"
+    },
+    {
+      "area": "Schema catalog vs real NetSuite \u2014 currency/consolidation semantics",
+      "issue": "The catalog states exchangerate converts 'to AUD base' and transactionaccountingline debit/credit are 'AUD base'. In real NetSuite, exchangerate converts to the transaction's OWN subsidiary base currency and TAL debit/credit are in that per-subsidiary base. The flagship consolidation few-shot (foreigntotal * exchangerate AS revenue_aud) and the P&L few-shot (sums TAL across all subsidiaries with no filter) bake this wrong model into generated SQL.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:17 ('to AUD base; demo uses static rates'), 44-49 ('GL impact rows... in AUD base currency'); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.js:77 (FX_TO_AUD static map applied to every sub), 174-208 (glFor converts everything to AUD); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:20-30 (P&L sums debit/credit across subsidiaries), 165-173 (ROUND(SUM(t.foreigntotal * t.exchangerate),2) AS revenue_aud).",
+      "impact": "In a real multi-subsidiary account these queries silently add USD + GBP + AUD amounts and label the total as one currency. P&L and 'revenue in AUD' outputs look completely plausible while being financially meaningless \u2014 exactly the wrong-looking-right class.",
+      "fix_direction": "Correct the catalog notes (exchangerate \u2192 subsidiary base), add a prompt rule requiring a subsidiary filter or consolidatedexchangerate for cross-subsidiary money math, and replace the consolidation few-shot with a per-subsidiary version plus an explicit caveat.",
+      "severity": "critical"
+    },
+    {
+      "area": "Schema catalog vs real NetSuite \u2014 string enums where production has FKs",
+      "issue": "customer.territory ('APAC'|'EMEA'|'AMER'), vendor.category ('Inventory'|...), and currency.name ('AUD'|'USD'|...) are modeled as filterable strings. In real NetSuite, territory and vendor category are numeric FKs (territory / vendorcategory tables), and the ISO code lives in currency.symbol while currency.name is the display name \u2014 the demo has these reversed (name='AUD', symbol='A$').",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:87 (territory string enum), 100 (vendor.category string enum), 184-188 (currency.name \"'AUD' | 'USD' | 'GBP' | 'EUR'\"); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.js:70-75 (name:'AUD', symbol:'A$'); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:77-82 (GROUP BY c.territory served as a curated answer).",
+      "impact": "Copied queries like WHERE c.territory='APAC' or cur.name='AUD' return 0 rows in production (silently 'no APAC revenue'), and GROUP BY c.territory / v.category emits raw internal ids as segment labels. Users trust segment breakdowns that never materialize or mislabel.",
+      "fix_direction": "Model these as FKs with their lookup tables in the catalog (or annotate 'numeric FK in real accounts \u2014 join territory/vendorcategory'), fix the currency name/symbol semantics in both catalog and demoData, and update the affected examples.",
+      "severity": "critical"
+    },
+    {
+      "area": "Keyless fallback matcher (lib/examples.js matchExample)",
+      "issue": "The keyword matcher scores on 5-character prefixes, accepts a single-word overlap as a match, breaks ties by array order, and \u2014 worst \u2014 returns EXAMPLES[0] ('Top 10 customers by revenue') for ANY question with zero keyword overlap. The response carries an empty explanation and only a subtle 'Curated' badge, so nothing tells the user the SQL answers a different question.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:183 (w.startsWith(k.slice(0,5)) scoring), 189 (return bestScore > 0 ? best : EXAMPLES[0]); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:103-108 (explanation: ''); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:261 (badge is the only signal). Concrete misfires: 'top items by revenue' scores top-customers (top+revenue=2) over best-selling-items (items=1) and returns customer SQL; 'New York customers' prefix-matches 'new'\u2192'Customers created in last 12 months'; 'GL balance by account' matches nothing \u2192 top-10-customers SQL.",
+      "impact": "In keyless mode (the documented default \u2014 README says the console 'still works'), users receive confidently rendered SQL that answers a different question, with real results in the grid. Copied to NetSuite it runs fine and reports the wrong thing.",
+      "fix_direction": "Require a minimum score (\u22652 or normalized threshold), return the matched example's question text as the explanation ('closest curated example: \u2026'), and return an honest 'no curated match \u2014 add an API key' error instead of defaulting to EXAMPLES[0].",
+      "severity": "critical"
+    },
+    {
+      "area": "API route \u2014 zero server-side validation, no repair loop",
+      "issue": "The route returns whatever the model emits, verbatim: no check that it is a single SELECT, no identifier validation against the TABLES catalog it already has in memory, no dry-run/EXPLAIN against the seeded SQLite DB (which runs fine in Node \u2014 the test file proves it), and when client-side execution fails the error is displayed and dropped \u2014 never fed back for a corrective second pass.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:54-56 (JSON.parse then return, Anthropic path) and 89-94 (Gemini path, only truthiness check on sql); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:157-160 (run() catch \u2192 setError only); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.test.mjs:57-63 (proves server-side seeded execution is trivially available); read-only enforcement exists only at client execution time (/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/sqlite.js:23-25), so non-SELECT or hallucinated-column SQL is still displayed and copyable.",
+      "impact": "Hallucinated tables/columns (e.g. t.duedate for an aging question \u2014 not in the schema) reach the user unchecked; a whole class of fixable one-shot errors ships as-is. Prompt-injected DML would be shown with a Copy button even though the demo refuses to run it.",
+      "fix_direction": "Server-side: enforce single-statement SELECT, lint identifiers against TABLES, dry-run against a seeded sql.js instance, and on failure do one repair round-trip appending the SQL error to the conversation before returning.",
+      "severity": "major"
+    },
+    {
+      "area": "API route \u2014 fallback chain gated on key presence, not failure",
+      "issue": "If ANTHROPIC_API_KEY is set, any Anthropic error (overload, invalid model id, truncated/unparseable JSON, network) returns 429/500 directly \u2014 it never falls through to Gemini or the curated examples. Only the Gemini block falls through on failure (its own comment says so), making the advertised 3-tier fallback unreachable in the primary path.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:57-63 (catch returns Response.json 429/500 inside the Anthropic branch) vs 67-68 ('Any failure (incl. free-tier 429) falls through to the curated examples below') and 98-100 (Gemini catch falls through). JSON.parse at route.js:55 also throws into this catch on stop_reason='max_tokens' truncation.",
+      "impact": "Users with a configured key see hard 'Generation failed' errors during any provider hiccup even though two working fallbacks sit directly below in the same function.",
+      "fix_direction": "Restructure so the Anthropic branch falls through to Gemini/examples on any non-refusal failure (optionally still surfacing a degraded-mode notice), and handle stop_reason 'max_tokens' explicitly.",
+      "severity": "major"
+    },
+    {
+      "area": "Dialect bridge \u2014 demo green-lights SQL that real SuiteQL rejects",
+      "issue": "The translator is one-directional (SuiteQL\u2192SQLite) and never flags SQLite-only constructs, so the permissive demo engine validates SQL that fails in production: LIMIT (prompt asks for FETCH FIRST but nothing detects violations, and Gemini adherence is unverified), WITH/CTEs and window functions (unsupported in SuiteQL, fine in SQLite), GROUP BY alias or ordinal (Oracle rejects, SQLite accepts), bare ISO string date comparisons (trandate is TEXT in the demo \u2014 seed works, real SuiteQL needs TO_DATE), and case-insensitive LIKE (SQLite matches '%harbor%', Oracle-flavoured SuiteQL returns 0 rows). The editor's highlighter even legitimizes LIMIT/IFNULL/STRFTIME/DATE as keywords.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/translate.js:13-35 (rewrites only, no lint of SQLite-isms); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/seed.js:17 (trandate TEXT makes '2026-01-01' string compares work); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:10-11 (rules mention FETCH FIRST/NVL but never ban CTE/window/GROUP-BY-alias/LIMIT-output or state case sensitivity); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:47-49 (KEYWORDS includes LIMIT|IFNULL|STRFTIME|DATE).",
+      "impact": "A query that runs green in the demo \u2014 the product's core trust signal \u2014 errors in a real account ('Invalid or unsupported search' for CTE/window/LIMIT/GROUP BY alias) or silently returns 0 rows (case-mismatched LIKE from a lowercase user question). Demo success is systematically false assurance.",
+      "fix_direction": "Add a pre-display SuiteQL lint (reject/flag LIMIT, WITH, OVER(), GROUP BY alias/ordinal, unquoted date-string comparisons; suggest UPPER() for LIKE), add matching negative rules to the prompt, and remove SQLite tokens from the highlighter.",
+      "severity": "major"
+    },
+    {
+      "area": "Dialect bridge \u2014 valid SuiteQL fails or silently empties in the demo",
+      "issue": "The reverse direction is equally leaky: only 4 TO_CHAR masks are mapped; the TO_CHAR/ADD_MONTHS regexes use [^,]+ so any nested call (TO_CHAR(ADD_MONTHS(SYSDATE,-1),'YYYY-MM')) is left untranslated because ADD_MONTHS is rewritten AFTER TO_CHAR; TO_DATE discards its format mask, so non-ISO masks become date('01/31/2026') \u2192 NULL \u2192 WHERE silently matches nothing; EXTRACT/TRUNC/DECODE/CONCAT/NVL2 have no mapping; and the transaction-quoting rewrite also mangles string literals containing the word 'transaction'.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/translate.js:6-11 (four masks only), 23-25 ([^,]+ arg capture; TO_CHAR pass runs before ADD_MONTHS at line 29), 27 (TO_DATE(...) \u2192 date($1), mask dropped \u2014 silent NULL for 'MM/DD/YYYY'), 32 (\\btransaction\\b replacement applies inside quoted literals).",
+      "impact": "Correct, production-valid SuiteQL either errors in the demo ('no such function: TO_CHAR') or silently returns 0 rows (dropped TO_DATE mask), training users to 'fix' correct queries into demo-only dialect before copying them to NetSuite. Also breaks AI output whenever the model nests date functions \u2014 a very common pattern.",
+      "fix_direction": "Extend function mappings, honor TO_DATE masks (or reject unknown ones loudly), use a balanced-paren argument matcher or a real tokenizer, skip string literals during rewrites, and surface 'untranslatable construct' as an explicit message instead of a raw SQLite error.",
+      "severity": "major"
+    },
+    {
+      "area": "Prompt construction \u2014 missing rules and forced answers",
+      "issue": "The system prompt omits: the current date (relative questions like 'this quarter' are guesswork), a refusal/insufficient-schema path \u2014 the output schema REQUIRES a sql string for every input, so 'what's the weather' or 'age my receivables by due date' must produce SQL \u2014 any negative examples, any sign-convention/mainline/case-sensitivity/consolidation rules (see criticals above), and any guidance to use accountingperiod/postingperiod for financial reporting (few-shots group by TO_CHAR(trandate), which won't tie to NetSuite period-based reports). It also bans all BUILTIN.* \u2014 the standard real-account mechanism for label display.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:5-14 (full rule list \u2014 six bullets), 23-31 (OUTPUT_SCHEMA required:['sql','explanation'], no error/notes field), 11 ('Avoid BUILTIN.*'); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js:20-30,36-40 (date grouping exclusively via TO_CHAR(trandate)).",
+      "impact": "Unanswerable questions yield confident hallucinated SQL (invented columns error visibly; approximations \u2014 trandate-based 'aging' \u2014 pass silently); month-grouped financials won't reconcile with NetSuite's own period reports; real-account idioms are actively suppressed.",
+      "fix_direction": "Inject today's date and the demo data range; add an optional 'error'/'caveats' field to the output schema with an explicit refusal rule; add the negative rules enumerated in the critical findings; scope the BUILTIN ban to demo execution rather than generation.",
+      "severity": "major"
+    },
+    {
+      "area": "Few-shot coverage vs the question space",
+      "issue": "Only 7 of 15 examples are sent as few-shots, and all are single-aggregate GROUP BYs. Zero few-shots demonstrate: any WHERE date filter (ADD_MONTHS appears only in a non-fewshot example), status filtering, credit/payment netting (AR balance = invoices \u2212 credits \u2212 payments), accountingperiod joins, HAVING, or subqueries. The schema itself lacks duedate and amountremaining/foreignamountunpaid, so AR aging and DSO \u2014 top real-world asks \u2014 are inexpressible.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:19 (EXAMPLES.filter(e => e.fewshot)); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/examples.js (fewshot:true only on lines 7,19,35,64,122,154,164; ADD_MONTHS only at 87-90 which is not fewshot); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:5-24 (transaction has no duedate, no amountremaining).",
+      "impact": "For common finance questions the model must invent columns (visible demo error) or approximate \u2014 e.g. 'AR balance by customer' likely sums CustInvc only, overstating AR by ignoring credits/payments, or leans on the fake status labels; 'aging by due date' gets silently answered from trandate. Both are presented as authoritative.",
+      "fix_direction": "Add duedate + foreignamountunpaid to catalog and demo data; broaden few-shots to cover date ranges, netting across types, period joins, and one 'not answerable' exemplar; send all curated examples (15 is cheap) or select few-shots by embedding similarity to the question.",
+      "severity": "major"
+    },
+    {
+      "area": "Feedback loop \u2014 failures captured nowhere",
+      "issue": "Execution failures are rendered and discarded: no client\u2192server error report, no server-side logging of question\u2192SQL\u2192outcome (only console.error on provider exceptions), no eval set accumulation. Worse, remember() persists the generated SQL to localStorage BEFORE run() executes it, so known-broken queries are saved and replayed verbatim from the Recent sidebar; user edits that fix a query are never re-saved.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:141-142 (remember(q, data.sql) then await run(data.sql)), 157-160 (catch \u2192 setError only), 324-339 (history replays stored SQL untouched); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:61,96 (console.error is the only telemetry, and only for provider errors \u2014 successful-but-wrong generations leave zero trace).",
+      "impact": "The pipeline cannot learn: nobody can see which questions produce failing or wrong SQL, the fallback matcher's misfires are invisible, and users re-trigger past failures from history with a visible error each time.",
+      "fix_direction": "Record outcome (ok/error + message) per generation, persist it with history, POST failures to a lightweight /api/feedback log, and use that corpus to drive the repair loop and example curation. Move remember() after a successful run or store the status flag.",
+      "severity": "major"
+    },
+    {
+      "area": "Read-only guard \u2014 blacklist false positives, execution-only enforcement",
+      "issue": "isReadOnly is a word blacklist tested against the whole string, so legitimate literals trip it (WHERE memo LIKE '%update%' or memo = 'create' \u2192 'Only SELECT queries are allowed'). Conversely it only runs at execution time in the browser \u2014 the server returns and the UI copies non-SELECT text freely.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/translate.js:37-39 (regex blacklist incl. CREATE/UPDATE/DELETE with \\b boundaries \u2014 matches inside quoted literals); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/sqlite.js:23-25 (only enforcement point); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:263-266 (Copy available regardless).",
+      "impact": "Valid memo/text-search queries fail visibly in the demo; and the guard provides no protection for the copy-to-production path (ties into the missing server-side validation).",
+      "fix_direction": "Replace with a positive check (statement must start with SELECT, single statement, after stripping literals/comments) enforced server-side and client-side.",
+      "severity": "minor"
+    },
+    {
+      "area": "UI trust cues around generated SQL",
+      "issue": "The provenance and health of the SQL is under-communicated: curated-fallback answers arrive with an empty explanation and only a small 'Curated' badge (nothing shows WHICH canned question was matched); Copy is enabled even when the query was never run or just failed; the AI badge is identical for Claude and Gemini; and the bar chart silently ignores middle columns of 3-column results.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/api/generate/route.js:104-108 (explanation: '' on fallback, matched example's question not returned); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/app/page.js:260-266 (badges + ungated Copy), 398-423 (BarChart uses row[0] and last column only).",
+      "impact": "Users cannot distinguish 'the model answered my question' from 'nearest canned example' or 'this SQL failed to execute' at the moment they hit Copy \u2014 amplifying every upstream wrongness finding.",
+      "fix_direction": "Surface the matched example question as the fallback explanation, disable or warn on Copy when the last run failed, badge the actual engine, and label omitted chart columns.",
+      "severity": "minor"
+    },
+    {
+      "area": "Documentation overclaims transferability",
+      "issue": "README and the schema header assert 'the SQL you see is genuine SuiteQL that transfers to a live account' and 'field names follow the real NetSuite analytics/SuiteQL tables so generated queries transfer', while the criticals above (status labels, netamount signs, FK-vs-string enums, AUD-base fiction, SQLite permissiveness) make transfer unreliable in exactly the high-traffic cases. Also the test file comment says '17 tables' while asserting 15 \u2014 the validation suite only proves examples run in the demo, never against real SuiteQL.",
+      "evidence": "/Users/Bivek.Shah/Documents/fable/netsuite/suitesense/README.md:41-43 (transfer claim) and 45 (read-only 'rejected client-side' presented as the safety story); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/schema.js:1-2 (same claim); /Users/Bivek.Shah/Documents/fable/netsuite/suitesense/lib/demoData.test.mjs:14-15 (comment/assert mismatch; demo-only validation).",
+      "impact": "Sets the exact expectation \u2014 demo success equals production correctness \u2014 that the pipeline cannot honor, increasing the chance users paste unverified SQL into live accounts.",
+      "fix_direction": "Add a 'known divergences from live NetSuite' section, a verify-in-sandbox caveat next to the Copy button, and (per the roadmap's RESTlet live mode) a real-account smoke test for the curated examples.",
+      "severity": "minor"
+    }
+  ],
+  "divergences": [
+    {
+      "aspect": "transaction.status value format",
+      "demo_behavior": "schema.js declares status as plain words: 'open' | 'paid' | 'pendingFulfillment' | 'pendingReceipt' | 'closed'; demoData.js STATUSES seeds those literals and examples.js filters t.status = 'open' / 'pendingFulfillment'.",
+      "real_behavior": "Real SuiteQL transaction.status returns type-prefixed internal codes: 'CustInvc:A' (Open), 'CustInvc:B' (Paid In Full), 'SalesOrd:B' (Pending Fulfillment), 'SalesOrd:G' (Billed), 'VendBill:A' (Open), etc. Human-readable text ('Paid In Full') only comes via BUILTIN.DF(transaction.status). There is no 'paid' or 'open' literal.",
+      "breaks_what": "Every status-filtered query: 'open invoices', 'paid invoices', 'orders pending fulfillment', 'open vendor bills'. WHERE t.status = 'open' returns ZERO rows on a real account \u2014 silent empty result, no error. This is the single most common AR/AP question class.",
+      "fix_direction": "Both. Change demoData STATUSES to real codes ('CustInvc:A', 'CustInvc:B', 'SalesOrd:B', 'SalesOrd:G', 'PurchOrd:B', 'VendBill:A', 'VendBill:B', ...) and update the schema.js note to enumerate them per type; add a prompt rule: 'status is a type-prefixed code; for display text use BUILTIN.DF(t.status); never compare against English words'. Update examples.js filters.",
+      "severity": "critical",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "transactionline population: mainline, tax, COGS, shipping rows",
+      "demo_behavior": "Demo transactionline contains exactly one row per sellable item line and nothing else \u2014 no mainline column, no header row, no tax/COGS/shipping/discount lines. Examples do naive SUM(l.netamount) grouped by item/department with no line-type filter.",
+      "real_behavior": "Real transactionline includes a mainline header row (mainline = 'T'), tax lines (taxline = 'T'), COGS lines, shipping/discount lines, and GL-impact rows. The bundled finance query-patterns reference computes transaction totals as SUM(ABS(tl.amount)) / 2 precisely because the line table carries both sides of the posting. Item analytics require mainline = 'F' AND taxline = 'F' (and COGS exclusion) or amounts double count.",
+      "breaks_what": "All line-grain aggregates: 'best-selling items', 'revenue by department/class', SKU mix, quantity sold. On a real account SUM(netamount) without mainline/taxline filters roughly doubles revenue and mixes GST and COGS into 'sales'. Silent wrong numbers, not errors.",
+      "fix_direction": "Both. Add mainline ('T'/'F'), taxline, and a header row + a tax line per invoice/bill to demoData so unfiltered SUMs are visibly wrong in the demo too; add prompt rule: 'line-level amount queries MUST filter mainline = 'F' AND taxline = 'F''. Update examples accordingly.",
+      "severity": "critical",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "Sign convention on line amounts (credit-negative)",
+      "demo_behavior": "demoData writes netamount as a positive number for invoice item lines (quantity * rate * jitter) and foreigntotal positive (negative only for CustCred). Examples treat SUM(netamount) as positive revenue and ORDER BY revenue DESC.",
+      "real_behavior": "Real transactionline.netamount / amount follow GL sign convention: income (credit) lines on an invoice are NEGATIVE; the header foreigntotal is positive. Vendor bill expense lines are positive (debit). The bundled query-patterns' SUM(ABS(tl.amount))/2 idiom exists because signs differ across lines of one transaction.",
+      "breaks_what": "Any line-level revenue metric: totals come out negative, ORDER BY ... DESC ranks the SMALLEST customers/items first, margin calcs (revenue minus COGS) get signs inverted, and CASE-based P&L from transactionline flips. Numbers are silently wrong in sign and ranking.",
+      "fix_direction": "Both. Flip demo netamount to credit-negative for CustInvc income lines (positive for VendBill), OR keep demo simple but add a hard prompt rule: 'on a real account use -netamount (or SUM(-tl.netamount)) for income lines, or aggregate from transactionaccountingline credit-debit'. Changing the demo data is safer since few-shot examples dominate generation.",
+      "severity": "critical",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "account.accttype value 'COGS' vs 'CostOfGoodsSold'",
+      "demo_behavior": "schema.js and demoData ACCOUNTS use accttype 'COGS'; the fewshot P&L example filters a.accttype IN ('COGS', 'Expense').",
+      "real_behavior": "Real SuiteQL account.accttype for cost of goods sold is 'CostOfGoodsSold' (confirmed verbatim in the bundled netsuite-finance-analyst query-patterns.md: accttype IN ('Income', 'Expense', 'CostOfGoodsSold')).",
+      "breaks_what": "P&L / margin / expense-breakdown queries: the COGS bucket silently matches zero accounts, so 'expenses' exclude all COGS and net income is overstated \u2014 the worst kind of silent financial error, and it is baked into a fewshot example.",
+      "fix_direction": "Both. Rename the demo value to 'CostOfGoodsSold' in schema.js note, demoData ACCOUNTS, and the P&L example. Trivial fix, no prompt rule needed once data matches.",
+      "severity": "critical",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "Currency consolidation via transaction.exchangerate",
+      "demo_behavior": "Demo defines exchangerate as a static rate 'to AUD base' regardless of subsidiary, and the fewshot 'revenue by subsidiary in AUD' example computes SUM(foreigntotal * exchangerate) as group-currency revenue.",
+      "real_behavior": "Real transaction.exchangerate converts transaction currency to the OWNING SUBSIDIARY's base currency (a USD invoice on the US sub has rate 1.0, not 1.52-to-AUD). Group/consolidated reporting uses the consolidatedexchangerate table (period average/current/historical by account type), and the bundled docs state flatly that SuiteQL cannot replicate the consolidation engine \u2014 a cross-subsidiary SUM is a pre-elimination, pre-translation aggregate.",
+      "breaks_what": "The consolidation fewshot and any 'total revenue across subsidiaries in AUD' query: on a real account foreigntotal * exchangerate yields each sub's LOCAL base amount, so USD and GBP revenue are summed as if they were AUD \u2014 silently wrong by the FX factor.",
+      "fix_direction": "Both. Fix the demo: make exchangerate subsidiary-relative (1.0 for same-currency txns) and either add a consolidatedexchangerate table or drop the AUD-consolidation fewshot; add prompt rule: 'exchangerate is to the subsidiary base currency; for group reporting join consolidatedexchangerate or defer to standard reports and label SuiteQL sums pre-elimination'.",
+      "severity": "critical",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "transaction missing posting / approvalstatus / recordtype / void",
+      "demo_behavior": "Demo transaction has no posting, approvalstatus, recordtype, void, createdby, or duedate columns; the only posting flag lives on transactionaccountingline, and schema notes say orders 'never post and have no rows here'.",
+      "real_behavior": "Real transaction carries posting ('T'/'F'), approvalstatus (2 = approved), void, recordtype (lowercase 'custinvc' \u2014 distinct from type 'CustInvc'), createdby, duedate. The Oracle connector skill mandates posting = 'T' and approvalstatus = 2 on every GL-accurate query, and its recordtype table + patterns filter t.recordtype = 'custinvc'.",
+      "breaks_what": "Two directions: (a) demo-trained queries omit posting/approval filters, so on a real account revenue includes unapproved, unposted, and voided transactions \u2014 inflated numbers; (b) queries written per Oracle guidance (t.recordtype = 'custinvc', t.posting = 'T') error in the demo because the columns don't exist, so the demo can't be used to rehearse correct real-world SQL. Also no duedate means AR aging cannot be expressed at all.",
+      "fix_direction": "Both. Add posting, approvalstatus, recordtype (lowercase), void, duedate to the demo schema/data; add prompt rule requiring posting = 'T' (and approvalstatus = 2 where relevant) on financial aggregates.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "transactionaccountingline shape: no transactionline key, no amount/netamount, no accountingbook",
+      "demo_behavior": "Demo TAL has only (transaction, account, debit, credit, posting) \u2014 one synthetic row set per transaction, joined on transaction alone; posting exists only here and only 'T' rows are generated.",
+      "real_behavior": "Real transactionaccountingline is keyed by (transaction, transactionline) \u2014 the canonical join is ON tal.transaction = t.id AND tal.transactionline = tl.id \u2014 and additionally carries amount, netamount, posting, and accountingbook (multi-book accounts have one row set per book). Nonposting transactions can have rows with posting = 'F'. The bundled reference also warns TAL availability varies by endpoint/feature set.",
+      "breaks_what": "Queries needing line dimensions with GL accounts (revenue by account AND department/class) can't be learned from the demo; on real multi-book accounts a demo-style join without accountingbook = primary double/triple counts every amount; relying on 'orders have no TAL rows' instead of posting = 'T' includes nonposting rows on real.",
+      "fix_direction": "Change demo: add transactionline (link to the line id), amount/netamount, accountingbook (constant 1) columns; add prompt rule: 'join TAL on both transaction and transactionline; always filter tal.posting = 'T' and primary accounting book'.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "accountingperiod missing isquarter / isyear / isadjust rollup rows",
+      "demo_behavior": "Demo generates only 25 monthly rows; schema exposes id, periodname, startdate, enddate, closed. periodname like 'Jul 2025' is unique.",
+      "real_behavior": "Real accountingperiod contains month rows PLUS quarter rollups ('Q1 2025'), year rollups ('FY 2025'), and adjustment periods, flagged by isquarter, isyear, isadjust. The bundled query-patterns period pattern filters isquarter = 'F' AND isyear = 'F' as standard practice; date-range joins on startdate/enddate without those filters match overlapping quarter/year rows.",
+      "breaks_what": "Any query joining accountingperiod by date range or aggregating 'per period' triples/quadruples amounts on a real account (month + its quarter + its year rows all match); periodname lookups can hit adjustment periods. Demo-trained queries omit the flags because the columns don't exist.",
+      "fix_direction": "Both. Add isquarter/isyear/isadjust columns and a few quarter/year rows to the demo so unfiltered joins visibly duplicate; add prompt rule: 'always filter isquarter = 'F' AND isyear = 'F' AND isadjust = 'F' on accountingperiod'.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "FETCH FIRST / OFFSET pagination vs ROWNUM",
+      "demo_behavior": "Fewshot examples use FETCH FIRST 10 ROWS ONLY, and translate.js converts FETCH/OFFSET to SQLite LIMIT, so the demo actively teaches FETCH syntax.",
+      "real_behavior": "The Oracle NetSuite AI-connector skill hard-rules 'No OFFSET/FETCH \u2014 use ROWNUM pagination' and 'NEVER skip ROWNUM <= 1000' for its SuiteQL endpoint. (Some SuiteQL surfaces do accept FETCH FIRST, so this is endpoint-dependent, but the target MCP/connector endpoint documented here rejects it.)",
+      "breaks_what": "Every 'top N' query \u2014 top customers, top vendors, best sellers \u2014 errors outright on the connector endpoint, and unbounded queries violate the ROWNUM <= 1000 guardrail.",
+      "fix_direction": "Mostly prompt/examples: rewrite fewshots to ROWNUM-style (or emit both and let a real-mode translator choose); optionally have translate.js accept ROWNUM so real-shaped queries also run in the demo. Verify against the actual target endpoint before committing, since SuiteQL REST does accept FETCH FIRST.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "Date literals and TO_DATE format masks",
+      "demo_behavior": "trandate is stored as TEXT ISO 'YYYY-MM-DD' in SQLite; bare string comparisons (t.trandate >= '2026-01-01') work, translate.js collapses any TO_DATE mask to date(literal), and only 4 TO_CHAR formats are whitelisted.",
+      "real_behavior": "Real trandate is a true DATE. Both bundled references mandate TO_DATE('<date>', 'MM/DD/YYYY') masks; bare ISO string comparisons depend on session NLS format and typically fail or mismatch. Real SuiteQL supports the full Oracle TO_CHAR/TRUNC/LAST_DAY family (demo silently passes unsupported formats through, so a query that works on real can break in demo and vice versa).",
+      "breaks_what": "Date-window filters \u2014 the backbone of every 'this quarter/last month' question. A demo-validated bare-string date filter errors or returns wrong rows on real; a real-correct TO_DATE('01/01/2026','MM/DD/YYYY') gets mangled by the demo translator (date('01/01/2026') is not a valid SQLite date).",
+      "fix_direction": "Both. Prompt rule: 'always wrap dates in TO_DATE with an explicit mask, never bare strings'; fix translate.js to honor the mask when converting (MM/DD/YYYY -> ISO) and to leave unknown TO_CHAR formats as visible errors instead of silent passthrough.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "transactionline missing account / amount / foreignamount columns",
+      "demo_behavior": "Demo lines expose item, quantity, rate, netamount only \u2014 no account, amount (base currency), or foreignamount.",
+      "real_behavior": "Real transactionline carries account (GL account per line), amount (base currency) and foreignamount (transaction currency) alongside netamount; both bundled references drive their canonical actuals patterns off tl.account and tl.amount (e.g. account LEFT JOIN transactionline tl ON tl.account = a.id).",
+      "breaks_what": "The standard real-world actuals-by-account pattern is unlearnable from the demo, and demo-trained queries use netamount (foreign currency) where base-currency amount is needed \u2014 cross-currency aggregates mix currencies silently. Real-correct queries referencing tl.account/tl.amount error in the demo.",
+      "fix_direction": "Change demo: add account, amount ( = netamount * exchangerate, signed), foreignamount to transactionline; then examples can use the same idioms the Oracle docs use.",
+      "severity": "major",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "Header total (foreigntotal) as revenue, and tax absence",
+      "demo_behavior": "Demo has no tax lines, so foreigntotal exactly equals the sum of item netamounts; multiple fewshots use SUM(t.foreigntotal) WHERE type = 'CustInvc' as 'revenue', including across territories/subsidiaries in mixed currencies.",
+      "real_behavior": "Real invoice foreigntotal is tax-INCLUSIVE (GST/VAT) and is in transaction currency; revenue is the tax-exclusive income-line total (or the Income posting on TAL). Summing header totals across entities also mixes currencies unless converted.",
+      "breaks_what": "'Top customers by revenue', 'monthly revenue trend', 'revenue by territory' overstate revenue by the tax rate (10% GST in AU) and, when customers span subsidiaries, add USD+GBP+AUD as raw numbers. Silent overstatement, matches neither the Income Statement nor management expectations.",
+      "fix_direction": "Both. Add a tax line + tax-inclusive foreigntotal to demo data so header-vs-line divergence is realistic; add prompt rule: 'revenue = income lines (mainline='F', taxline='F') or TAL Income credits, not header totals; convert currency explicitly'.",
+      "severity": "major",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "customer.territory as free-text string",
+      "demo_behavior": "Demo customer.territory is a varchar with literal values 'APAC' | 'EMEA' | 'AMER'; a fewshot groups revenue by c.territory directly.",
+      "real_behavior": "Real customer.territory is a numeric reference to the territory table (sales territory feature); grouping by it yields internal IDs, and the values are account-specific names, never guaranteed to be 'APAC'/'EMEA'/'AMER'. Region analysis on real accounts usually goes through subsidiary, billcountry, or a custom field instead.",
+      "breaks_what": "'Revenue by territory/region' returns raw IDs (or errors if compared to 'APAC'), and WHERE c.territory = 'APAC' matches nothing. Silent empty/cryptic results.",
+      "fix_direction": "Change demo: model territory as an id joining a small territory table (or drop it and use subsidiary/country for region examples); prompt rule: 'territory is a record reference \u2014 join or BUILTIN.DF it, and verify the account actually uses territories'.",
+      "severity": "major",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "inventorybalance table availability and shape",
+      "demo_behavior": "Demo inventorybalance has one row per (item, location) with quantityonhand/quantityavailable, always present.",
+      "real_behavior": "Real 'inventorybalance' exists only on accounts with bin/inventory-status features and is grained per bin/status (item, location, binnumber, status) \u2014 multiple rows per item-location. The universally available per-location quantity table is aggregateitemlocation (quantityonhand, quantityavailable), or itemlocationmap depending on account. The bundled docs' metadata-guard section stresses exactly this class of table-availability variance.",
+      "breaks_what": "'Stock on hand by location' either errors (table not exposed) or double counts (summing bin/status rows without grouping) on real accounts; the demo never teaches the aggregateitemlocation fallback.",
+      "fix_direction": "Both. Prefer renaming/basing the demo table on aggregateitemlocation semantics, or keep both names; prompt rule: 'probe table availability (metadata call or FETCH FIRST 1 probe) and fall back aggregateitemlocation <-> inventorybalance'.",
+      "severity": "major",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "Entity polymorphism (customer/vendor over one entity id-space)",
+      "demo_behavior": "Demo keeps customer ids 1-40 and vendor ids 101-115 in one non-overlapping id space and joins transaction.entity to customer.id or vendor.id \u2014 structurally close to real.",
+      "real_behavior": "Real NetSuite has a single polymorphic entity table; customer/vendor/employee are specialized views sharing that id space, joined via their id exactly as the demo does (both bundled references use c.id = t.entity). Differences: real also exposes the entity base table and BUILTIN.DF(t.entity) for name resolution regardless of type, and entityid on real is the auto-numbered/name string ('104 Harbor Logistics'), not 'CUST-104'.",
+      "breaks_what": "Mostly survives. Breaks: mixed AR+AP listings (payments to vendors and customers in one query) \u2014 demo teaches separate joins where real would use entity/BUILTIN.DF; and any filter on entityid LIKE 'CUST-%' patterns matches nothing on real.",
+      "fix_direction": "Prompt rule is enough: 'for type-agnostic entity names use BUILTIN.DF(t.entity) or the entity table; entityid formats are account-specific'. Optionally note in schema.js that CUST-/VEND- prefixes are demo-only.",
+      "severity": "minor",
+      "confidence": "documented"
+    },
+    {
+      "aspect": "item.baseprice vs pricing table",
+      "demo_behavior": "Demo item has a scalar baseprice used to seed rates.",
+      "real_behavior": "The Oracle connector skill does list baseprice among item essential fields, but on real accounts with Multiple Prices/Multi-Currency (most mid-market accounts) list prices live in the pricing table (item, pricelevel, currency, unitprice) and item.baseprice is unpopulated/not queryable; effective sell price is the line rate anyway.",
+      "breaks_what": "Queries like 'items priced above X' or margin-vs-list comparisons return nulls/errors on pricing-feature accounts. Low frequency in analytics workloads.",
+      "fix_direction": "Prompt rule: 'prefer transactionline.rate for realized price; list price requires the pricing table on multi-price accounts'. Demo change optional (add a pricing table only if such questions matter).",
+      "severity": "minor",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "currency.name values and symbol semantics",
+      "demo_behavior": "Demo currency.name is the ISO code ('AUD') and symbol is the glyph ('A$'); a fewshot selects cur.name as the currency code.",
+      "real_behavior": "Real currency.name is the display name (e.g. 'Australian Dollar' / whatever the admin typed) while symbol holds the ISO code ('AUD'); displaysymbol holds the glyph. Filtering name = 'AUD' typically matches nothing.",
+      "breaks_what": "Currency-labeled outputs show long names instead of codes; WHERE cur.name = 'USD' filters silently return empty.",
+      "fix_direction": "Change demo (name = 'Australian Dollar', symbol = 'AUD', add displaysymbol) and add a one-line prompt note: 'ISO code lives in currency.symbol'.",
+      "severity": "minor",
+      "confidence": "recalled"
+    },
+    {
+      "aspect": "NVL/ISNULL and null hygiene",
+      "demo_behavior": "translate.js maps NVL -> IFNULL, but demo data has no nulls in amount fields and examples never use NVL, so generation is not conditioned to null-guard.",
+      "real_behavior": "Real accounts have null amounts/memos/entities everywhere; the Oracle checklist requires NVL() on all nullable amount/text fields and notes ISNULL/IFNULL are invalid on the real endpoint (Oracle SQL).",
+      "breaks_what": "Aggregates with arithmetic on nullable fields (amount - NVL-less credit) return NULL rows on real; any IFNULL the model learned from SQLite-flavored feedback errors outright on real.",
+      "fix_direction": "Prompt rule ('use NVL, never IFNULL/ISNULL; NVL-wrap nullable amounts') plus seed a few null memos/employees in demoData so unguarded queries misbehave visibly.",
+      "severity": "minor",
+      "confidence": "documented"
+    }
+  ],
+  "gotchas": [
+    {
+      "topic": "transaction/transactionline join \u2014 duplicate rows without mainline filter",
+      "rule": "All transactions live in one `transaction` table and header queries that join `transactionline` return one row per line. To replicate the saved-search 'Main Line = true' behavior and avoid duplicate/double-counted transactions, add `transactionline.mainline = 'T'` to the join or WHERE. Join key is `transactionline.transaction = transaction.id`.",
+      "example_wrong": "SELECT t.tranid, t.foreigntotal FROM transaction t JOIN transactionline tl ON tl.transaction = t.id WHERE t.type = 'SalesOrd' -- returns one row per line item, inflating counts and sums",
+      "example_right": "SELECT t.tranid, t.foreigntotal FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T' WHERE t.type = 'SalesOrd'",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-querying-transactions/ and https://www.netsuitediagnostics.com/posts/suiteql-transactionline-mainline/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Header fields that only exist on the mainline transactionline row",
+      "rule": "Several header-level fields are NOT exposed on the `transaction` table in the SuiteQL analytics (netsuite2.com) schema \u2014 notably `location` (removed), `subsidiary` (not exposed), and `createdfrom`. They must be read from the transactionline mainline row (`mainline='T'`). Each transaction has exactly one mainline row; for sales orders/fulfillments the mainline row's `item` is NULL (only work orders/assembly builds carry the built item on the mainline).",
+      "example_wrong": "SELECT t.tranid, t.subsidiary, t.location FROM transaction t -- fails: subsidiary/location are not columns of transaction in SuiteQL",
+      "example_right": "SELECT t.tranid, tl.subsidiary, tl.location, tl.createdfrom FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'",
+      "source": "https://www.netsuitediagnostics.com/posts/suiteql-transactionline-mainline/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Transaction status raw codes are single letters, not saved-search 'Type:Letter' strings",
+      "rule": "In SuiteQL, `transaction.status` returns bare single-letter codes ('A','B','C',...,'V','X','Y') that are only meaningful in combination with `transaction.type`. The saved-search style prefixed value ('CustInvc:A', 'SalesOrd:B') does NOT match in SuiteQL. Always filter type + status letter together, or compare on BUILTIN.DF(status) for the human string ('Invoice : Open').",
+      "example_wrong": "SELECT id FROM transaction WHERE status = 'CustInvc:A' -- matches nothing; SuiteQL stores just 'A'",
+      "example_right": "SELECT id FROM transaction WHERE type = 'CustInvc' AND status = 'A' -- Invoice : Open. Discover codes with: SELECT type, status, BUILTIN.DF(status) FROM transaction GROUP BY type, status, BUILTIN.DF(status)",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-transaction-statuses/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "BUILTIN.DF returns a formatted display string \u2014 never filter/join on it expecting raw IDs",
+      "rule": "BUILTIN.DF(field) 'returns the display value of a field from the target record type without joining it explicitly', but the output is display-formatted text \u2014 e.g. BUILTIN.DF(createdfrom) yields 'Work Order #WO110', not 'WO110', and BUILTIN.DF(status) yields 'Sales Order : Billed'. Use it only in SELECT for labels; filter on raw IDs/codes, and for portable display names prefer explicit joins (e.g. join entity/item/account tables and select their name fields).",
+      "example_wrong": "WHERE BUILTIN.DF(tl.createdfrom) = 'WO110' -- fails: actual value is 'Work Order #WO110'; also slow",
+      "example_right": "SELECT c.entityid, c.companyname FROM transaction t JOIN customer c ON c.id = t.entity -- portable join; or SELECT BUILTIN.DF(t.entity) purely for display",
+      "source": "https://www.netsuitediagnostics.com/posts/suiteql-transactionline-mainline/ and https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/article_161950565221.html",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Sign convention: transactionline amounts/quantities are ledger-signed (sales side is negative)",
+      "rule": "transactionline stores GL-signed values, not UI values: on invoices, item fulfillments, and work orders, `quantity` (and revenue-side netamount/foreignamount on item lines) is NEGATIVE even though the UI shows it positive; item receipts and sales-order demand lines are positive. Multiply by -1 (or use ABS/SUM of credit-debit) when reporting sales figures from line tables.",
+      "example_wrong": "SELECT SUM(tl.netamount) AS revenue FROM transactionline tl JOIN transaction t ON t.id = tl.transaction WHERE t.type = 'CustInvc' AND tl.mainline = 'F' -- revenue comes out negative",
+      "example_right": "SELECT SUM(tl.netamount) * -1 AS revenue FROM transactionline tl JOIN transaction t ON t.id = tl.transaction WHERE t.type = 'CustInvc' AND tl.mainline = 'F' AND tl.taxline = 'F'",
+      "source": "https://www.netsuitediagnostics.com/posts/transactions-inventory/ ('The quantity is sometimes negative even if on the UI it shows it as positive')",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Tax lines must be excluded or sign-flipped when summing transaction lines",
+      "rule": "Rows with `transactionline.taxline = 'T'` carry tax amounts whose foreignamount must be multiplied by -1 (or subtracted) when computing transaction totals from lines; also exclude them (`taxline='F'`) when summing net merchandise amounts. Note quantities are always in the base unit of measure (a '5 Case (50 lb)' line stores quantity 250).",
+      "example_wrong": "SELECT SUM(tl.foreignamount) FROM transactionline tl ... -- silently mixes tax lines into the merchandise total with the wrong sign",
+      "example_right": "SELECT SUM(CASE WHEN tl.taxline = 'T' THEN tl.foreignamount * -1 ELSE tl.foreignamount END) ... -- or filter AND tl.taxline = 'F' for net-of-tax",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-sales-tax/ and https://support.cloudextend.io/extendinsights-netsuite/en/articles/13770465-sales-suiteql-for-top-10-sales-reps",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "GL impact: use transactionaccountingline with posting='T' on BOTH tables; debit/credit only exist there",
+      "rule": "Debit/credit columns are NOT exposed on transactionline; GL impact lives in `transactionaccountingline` (columns: account, amount, debit, credit, posting, netamount). Filter `transaction.posting = 'T' AND transactionaccountingline.posting = 'T'` to include only lines that actually hit the GL. For income accounts, net revenue = SUM(COALESCE(credit,0) - COALESCE(debit,0)). Join back to lines on BOTH keys: tal.transaction = tl.transaction AND tal.transactionline = tl.id.",
+      "example_wrong": "SELECT tl.debit, tl.credit FROM transactionline tl -- no such columns; and summing TAL without posting='T' includes non-posting amounts",
+      "example_right": "SELECT SUM(COALESCE(tal.credit,0) - COALESCE(tal.debit,0)) FROM transaction t JOIN transactionaccountingline tal ON tal.transaction = t.id JOIN account a ON a.id = tal.account WHERE t.posting = 'T' AND tal.posting = 'T' AND a.accttype = 'Income'",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-gl-impact/ and https://medium.com/@suiteprotips/how-to-get-total-net-sales-in-netsuite-using-suiteql-a-complete-guide-0e8e25d13384",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Date literals: always TO_DATE with an explicit format mask, never bare strings",
+      "rule": "Comparing date columns to bare string literals depends on the account's date-format preference (US '1/15/2025' vs ISO) and breaks across accounts. Use TO_DATE('...','YYYY-MM-DD') (and TO_DATE with time elements for datetimes). BETWEEN works on dates once both bounds are TO_DATE'd. SYSDATE returns server-based current datetime; CURRENT_DATE returns the user's timezone-based datetime \u2014 prefer one deliberately.",
+      "example_wrong": "WHERE t.trandate >= '2025-01-01' -- format-preference dependent; may error or silently mismatch",
+      "example_right": "WHERE t.trandate BETWEEN TO_DATE('2025-01-01','YYYY-MM-DD') AND TO_DATE('2025-01-31','YYYY-MM-DD')",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-dates-times/ and https://cli.suiteportal.io/docs/guides/suiteql-gotchas",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Datetime fields display date-only by default; use TO_CHAR/TRUNC; Oracle date functions supported",
+      "rule": "SuiteQL returns only the date portion of timestamp fields by default \u2014 use TO_CHAR(field,'YYYY-MM-DD HH24:MI:SS') to see time. Supported Oracle date functions include TO_CHAR, TO_DATE, TRUNC(date), ADD_MONTHS, LAST_DAY, NEXT_DAY, SYSDATE arithmetic (SYSDATE+1 day, +10/1440 minutes). Format masks like 'YYYY-MM-DD', 'MM', 'MONTH', 'DAY', 'Q', 'WW' work.",
+      "example_wrong": "SELECT lastmodifieddate FROM transaction -- time component silently dropped in output",
+      "example_right": "SELECT TO_CHAR(lastmodifieddate,'YYYY-MM-DD HH:MI:SS') FROM transaction WHERE lastmodifieddate >= TRUNC(SYSDATE) - 7",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-dates-times/ and https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_158513731864.html",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Pagination: TOP and FETCH FIRST are supported, but OFFSET is SILENTLY IGNORED in the query text",
+      "rule": "SuiteQL supports SELECT TOP n and FETCH FIRST/NEXT n ROWS ONLY, but the SQL OFFSET clause 'is simply ignored, and no error is thrown' \u2014 every page returns the same first rows. Paginate either via the API layer (REST ?limit=&offset= query params, or N/query runSuiteQLPaged) or via nested-subquery ROWNUM ranges (ROWNUM is assigned before ORDER BY, so sort in an inner subquery first, then filter ROWNUM outside).",
+      "example_wrong": "SELECT id FROM transaction ORDER BY id OFFSET 1000 ROWS FETCH NEXT 1000 ROWS ONLY -- OFFSET ignored; page 2 equals page 1",
+      "example_right": "SELECT * FROM (SELECT ROWNUM rn, x.* FROM (SELECT id, tranid FROM transaction ORDER BY id) x) WHERE rn BETWEEN 1001 AND 2000 -- or use REST /query/v1/suiteql?limit=1000&offset=1000",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-query-pagination/ and https://timdietrich.me/blog/netsuite-suiteql-pagination/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Row/governance limits differ per execution context (1000 REST page, 5000 N/query, 100k total)",
+      "rule": "REST /query/v1/suiteql returns max 1000 rows per page (limit param) and requires the 'Prefer: transient' header; total results via REST are capped at 100,000 unless SuiteAnalytics Connect is enabled. N/query query.runSuiteQL / runSuiteQLPaged in SuiteScript returns up to 5000 rows per call/page. An AI generator should emit bounded queries (aggregate or FETCH FIRST) or plan pagination rather than assume unlimited results.",
+      "example_wrong": "Issuing SELECT * FROM transactionline via REST and assuming all rows arrive in one response (silently truncated at the page limit)",
+      "example_right": "POST /services/rest/query/v1/suiteql?limit=1000&offset=0 with header 'Prefer: transient', then follow hasMore/offset pages; or aggregate server-side with GROUP BY",
+      "source": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_157909186990.html and https://www.netsuitediagnostics.com/posts/suiteql-bypassing-5000-limits/",
+      "confidence": "official-docs"
+    },
+    {
+      "topic": "Accounting periods: exclude quarter/year/adjustment rollup rows and join via postingperiod",
+      "rule": "The `accountingperiod` table contains monthly periods PLUS quarter and year summary rows and adjustment periods. For monthly reporting filter isquarter = 'F' AND isyear = 'F' (and usually isadjust = 'F', isposting = 'T'); otherwise sums are double/triple-counted. Join transactions with transaction.postingperiod = accountingperiod.id, and filter posted GL activity by postingperiod rather than trandate for financial reports.",
+      "example_wrong": "SELECT ap.periodname, SUM(...) FROM accountingperiod ap JOIN transaction t ON t.postingperiod = ap.id GROUP BY ap.periodname -- includes Q1/FY rollup periods, double counting",
+      "example_right": "... JOIN accountingperiod ap ON ap.id = t.postingperiod WHERE ap.isquarter = 'F' AND ap.isyear = 'F' AND ap.isadjust = 'F' AND ap.isposting = 'T'",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-accounting-periods/ and https://support.cloudextend.io/extendinsights-netsuite/en/articles/13067129-finance-monthly-profit-and-loss-by-account-fixed-monthly-columns",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Booleans are 'T'/'F' character strings, not TRUE/FALSE",
+      "rule": "Every NetSuite boolean/checkbox field (mainline, posting, isinactive, taxline, isadjust, ...) is a one-character string compared against 'T' or 'F'. SQL boolean literals or 1/0 do not work.",
+      "example_wrong": "WHERE isinactive = false  -- or WHERE mainline = 1: error / no match",
+      "example_right": "WHERE isinactive = 'F' AND mainline = 'T'",
+      "source": "https://cli.suiteportal.io/docs/guides/suiteql-gotchas and Oracle SuiteQL examples at https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_156257790831.html",
+      "confidence": "official-docs"
+    },
+    {
+      "topic": "Case sensitivity: identifiers are case-insensitive (transaction needs no quoting), string values are case-sensitive",
+      "rule": "Table/column names are case-insensitive and `transaction` is used unquoted in Oracle's own SuiteQL examples \u2014 no quoting/aliasing is required despite it being reserved in other SQL dialects. But STRING comparisons are case-sensitive Oracle semantics: type codes must match exact casing ('CustInvc', 'SalesOrd', 'VendBill'), and 'T'/'F' flags are uppercase.",
+      "example_wrong": "SELECT id FROM transaction WHERE type = 'CUSTINVC' -- returns 0 rows; wrong case on the value",
+      "example_right": "SELECT id FROM Transaction WHERE Type = 'CustInvc' -- identifier casing free, literal casing exact",
+      "source": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_156257790831.html and https://cli.suiteportal.io/docs/guides/suiteql-gotchas",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "GROUP BY strictness: every non-aggregated expression in SELECT/HAVING/ORDER BY must be in GROUP BY",
+      "rule": "SuiteQL enforces Oracle ORA-00979-style grouping: any column not wrapped in an aggregate must appear in GROUP BY, including expressions like BUILTIN.DF(field) \u2014 group by the identical expression. Violations surface as 'Search error occurred: Invalid or unsupported search' rather than a helpful grouping error. Ordering by an aggregate alias (ORDER BY total DESC) is allowed.",
+      "example_wrong": "SELECT type, status, COUNT(*) FROM transaction GROUP BY type -- status not grouped: 'Invalid or unsupported search'",
+      "example_right": "SELECT type, status, COUNT(*) AS n FROM transaction GROUP BY type, status ORDER BY n DESC",
+      "source": "https://netsuiteprofessionals.com/blog/question/error-when-using-group-by-in-suiteql/ and https://timdietrich.me/blog/netsuite-suiteql-transaction-statuses/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Don't mix SQL-92 and Oracle syntax in one query; prefer Oracle syntax",
+      "rule": "Official docs: 'SuiteQL supports the syntax for both SQL-92 and Oracle SQL', but 'you can't use both syntaxes in the same query', and Oracle warns that SQL-92-converted queries risk 'critical performance issues, such as time outs that aren't operationally remediable... You should use Oracle SQL syntax when creating SuiteQL queries.' SELECT DISTINCT, TOP n, UNION, HAVING, and subqueries are documented as supported (older community posts claiming DISTINCT is unsupported are outdated).",
+      "example_wrong": "Mixing dialects, e.g. SQL-92 join style plus Oracle-specific constructs in the same statement, or relying on non-Oracle functions like DATEADD/GETDATE",
+      "example_right": "Pure Oracle-style: SELECT DISTINCT email FROM transaction; SELECT TOP 10 * FROM transaction; TO_DATE/ADD_MONTHS/NVL for expressions",
+      "source": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_156257790831.html",
+      "confidence": "official-docs"
+    },
+    {
+      "topic": "Currency: transaction.exchangerate for transaction-date base conversion; consolidatedexchangerate/BUILTIN.CONSOLIDATE for OneWorld rollups",
+      "rule": "foreignamount/foreigntotal are in the transaction currency; multiply by the transaction's stored `exchangerate` (rate on the transaction date) for subsidiary-base amounts, or use BUILTIN.CURRENCY_CONVERT(field, targetCurrency, date). For consolidated OneWorld reporting these are NOT enough: period-specific rates live in `consolidatedexchangerate` (postingperiod, fromsubsidiary, tosubsidiary, currentrate/averagerate/historicalrate) and BUILTIN.CONSOLIDATE(amount, 'LEDGER'|'INCOME', rateType, ...) applies them; income statement amounts use average rate, balance sheet current, equity historical.",
+      "example_wrong": "SELECT SUM(foreigntotal) FROM transaction -- sums mixed currencies; or using transaction exchangerate for consolidated P&L across subsidiaries",
+      "example_right": "SELECT trandate, foreigntotal, foreigntotal * exchangerate AS basetotal, BUILTIN.CURRENCY_CONVERT(foreigntotal, 2, trandate) AS basetotal2 FROM transaction WHERE id = 123; for consolidation: BUILTIN.CONSOLIDATE(tl.netamount, 'INCOME', 'DEFAULT', 'DEFAULT', <toSubsidiary>, t.postingperiod, ...)",
+      "source": "https://timdietrich.me/blog/netsuite-suiteql-currency-exchange-rates/ and https://medium.com/@suiteprotips/mastering-multi-currency-consolidation-in-netsuite-a-deep-dive-into-the-consolidated-exchange-rate-49d209ebf3f6",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Error 'Search error occurred: Invalid or unsupported search' \u2014 four distinct triggers",
+      "rule": "This generic error is triggered by: (1) referencing a field not exposed to SuiteQL, (2) query timeout (~5 minutes, e.g. under query.runPaged), (3) GROUP BY violations (non-aggregated, ungrouped column), (4) LISTAGG output exceeding roughly 3600 characters of concatenated text. An AI generator should respond by checking field queryability, tightening filters, fixing grouping, and truncating/aggregating LISTAGG inputs.",
+      "example_wrong": "SELECT LISTAGG(memo, ', ') WITHIN GROUP (ORDER BY id) FROM transactionline GROUP BY transaction -- long memos blow the ~3600-char limit and throw 'Invalid or unsupported search'",
+      "example_right": "SELECT LISTAGG(SUBSTR(memo,1,50), ', ') WITHIN GROUP (ORDER BY id) ... -- bound the concatenation; also verify fields in the Records Catalog and group all non-aggregates",
+      "source": "https://community.oracle.com/netsuite/english/discussion/4490458/suiteql-search-error-occurred-invalid-or-unsupported-search and https://skcah.com/posts/suitesql-listagg-invalid-or-unsupported-search-error/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Error 'Unknown identifier' \u2014 REST-catalog fields that are not SuiteQL-queryable",
+      "rule": "Not every field shown in the REST metadata catalog or Records Catalog is queryable in SuiteQL. Computed/summary fields (customer.balance, transaction 'total' variants, consolBalance), Time-of-Day custom fields, and Document-type custom fields raise 'Unknown identifier <field>' (400 Bad Request) in SELECT or WHERE. Compute equivalents via aggregation instead, and validate identifiers against actually-queryable columns.",
+      "example_wrong": "SELECT id, balance FROM customer -- 'Unknown identifier balance'",
+      "example_right": "SELECT t.entity, SUM(t.foreigntotal) AS balance FROM transaction t WHERE t.type = 'CustInvc' GROUP BY t.entity",
+      "source": "https://cli.suiteportal.io/docs/guides/suiteql-gotchas and https://community.oracle.com/netsuite/english/discussion/4473091/missing-time-of-day-fields-in-custom-record-table-suiteql-query",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "NULL semantics: != and NOT IN silently drop NULL rows",
+      "rule": "Standard Oracle NULL semantics apply: inequality comparisons never match NULL, so filters like email != 'x' exclude records with no email at all. Add OR field IS NULL when 'different or empty' is intended; use NVL()/COALESCE() in aggregates (debit/credit are NULL, not 0, on transactionaccountingline).",
+      "example_wrong": "WHERE email != 'test@example.com' -- customers with NULL email vanish from results; SUM(credit - debit) returns NULL rows",
+      "example_right": "WHERE (email != 'test@example.com' OR email IS NULL); SUM(COALESCE(credit,0) - COALESCE(debit,0))",
+      "source": "https://cli.suiteportal.io/docs/guides/suiteql-gotchas and https://medium.com/@suiteprotips/how-to-get-total-net-sales-in-netsuite-using-suiteql-a-complete-guide-0e8e25d13384",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "BUILTIN functions are a SuiteQL-only dialect feature; use RAW context by default",
+      "rule": "BUILTIN.DF/CF/CONSOLIDATE/CURRENCY_CONVERT/PERIOD/RELATIVE_RANGES/MNFILTER/HIERARCHY are SuiteQL extensions beyond SQL-92 (documented in 'SuiteQL Supported Built-in Functions'); they are not part of plain Oracle SQL and behave inconsistently or are unavailable through SuiteAnalytics Connect ODBC drivers \u2014 for queries that must also run over Connect, replace BUILTIN.DF with explicit joins to the referenced table. Field values default to the RAW context (internal IDs), which is why BUILTIN.DF exists for display values.",
+      "example_wrong": "Assuming a query using BUILTIN.DF(salesrep) is portable to an ODBC/Connect pipeline (community reports it failing to return display values there)",
+      "example_right": "SELECT e.entityid AS salesrep_name FROM transaction t LEFT JOIN employee e ON e.id = t.employee -- join-based display name, portable everywhere",
+      "source": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/article_161950565221.html and https://netsuiteprofessionals.com/blog/question-category/suiteanalytics-connect/",
+      "confidence": "community-verified"
+    },
+    {
+      "topic": "Multi-select fields cannot be compared with = \u2014 use BUILTIN.MNFILTER, and its arguments are strings",
+      "rule": "Multi-select fields require BUILTIN.MNFILTER(field, 'MN_INCLUDE'|'MN_EXCLUDE', ..., 'FALSE', values...) instead of = or IN. Passing an unquoted boolean instead of the string 'FALSE' raises 'Search error occurred: Unknown identifier'.",
+      "example_wrong": "WHERE custrecord_multiselect = '5'  -- or BUILTIN.MNFILTER(field, 'MN_INCLUDE', '', false, '5') with bare false: Unknown identifier error",
+      "example_right": "WHERE BUILTIN.MNFILTER(custrecord_multiselect, 'MN_INCLUDE', '', 'FALSE', '5') = 'T'",
+      "source": "https://netsuite.smash-ict.com/builtin-mnfilter-for-multi-select-fields/",
+      "confidence": "community-verified"
+    }
+  ],
+  "cases": [
+    {
+      "id": "T01",
+      "category": "revenue-rollups",
+      "question": "What was our total invoice revenue in Q1 2026?",
+      "expected_outcome": "Single aggregate from transaction headers: must filter type='CustInvc' AND a date scope resolving to 2026-01-01..2026-03-31 (trandate range, or postingperiod join to Jan/Feb/Mar 2026 periods). SUM(foreigntotal) minimally acceptable; a consultant prefers SUM(foreigntotal*exchangerate) labelled AUD or an explicit currency-mix caveat. Must not include SalesOrd or CustPymt.",
+      "validation_predicate": "SQL: table 'transaction' present; matches /type\\s*=\\s*'CustInvc'/i; contains a date/period filter bounding Jan 1 2026 and Mar 31 2026 in any format, OR periodname IN ('Jan 2026','Feb 2026','Mar 2026'); does NOT match /'SalesOrd'|'CustPymt'/. RESULT: exactly 1 row with 1 numeric aggregate (label columns allowed).",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Summing foreigntotal across AUD/USD/GBP/EUR transactions without exchangerate yields a meaningless mixed-currency number in any real multi-subsidiary account."
+    },
+    {
+      "id": "T02",
+      "category": "revenue-rollups",
+      "question": "monthly net revenue for the trailing 12 months, counting credit memos as negative",
+      "expected_outcome": "transaction table; type IN ('CustInvc','CustCred') with a CASE (or signed UNION) negating CustCred amounts; GROUP BY month of trandate; rolling filter trandate >= ADD_MONTHS(SYSDATE,-12) or explicit Jul 2025 onward; ordered by month.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /'CustCred'/; a negation construct bound to CustCred (e.g. /CASE[\\s\\S]*CustCred[\\s\\S]*THEN\\s*-/i or subtraction of a credits aggregate); a month-bucket expression on trandate in GROUP BY; a rolling-12-month filter (ADD_MONTHS/SYSDATE) or explicit >= Jul 2025 bound. RESULT: 12-13 rows, columns (month, net_amount).",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Credit memo totals are stored as positive numbers \u2014 adding instead of subtracting them overstates revenue. The nearest few-shot ('Monthly invoice revenue trend') anchors the model to CustInvc-only with no credit netting."
+    },
+    {
+      "id": "T03",
+      "category": "revenue-rollups",
+      "question": "how much did we invoice last month",
+      "expected_outcome": "type='CustInvc'; calendar month before today (Jun 2026): bounded first-through-last day via TRUNC(SYSDATE,'MM')/ADD_MONTHS arithmetic, explicit 2026-06-01..2026-06-30, or periodname='Jun 2026'; single SUM(foreigntotal).",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'CustInvc'/i; month-bounded filter resolving to Jun 1-30 2026 (SYSDATE month arithmetic, explicit dates, or periodname='Jun 2026'); does NOT use a rolling /SYSDATE\\s*-\\s*30/ window. RESULT: 1 row, 1 numeric aggregate.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "'Last month' generated as a SYSDATE-30 rolling window instead of the prior calendar month \u2014 the figure never ties to the Jun 2026 period close and drifts day by day."
+    },
+    {
+      "id": "T04",
+      "category": "revenue-rollups",
+      "question": "weekly invoiced totals from 1 May 2026 to 30 June 2026",
+      "expected_outcome": "type='CustInvc'; trandate >= 2026-05-01 AND trandate <= 2026-06-30; GROUP BY week bucket (TO_CHAR(trandate,'IYYY-IW') or TRUNC(trandate,'IW')); ordered by week key.",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'CustInvc'/i; both boundary dates (May 1 2026 and Jun 30 2026) present in any parseable format; a week-grouping expression (/IW|WW/i inside TO_CHAR or TRUNC); ORDER BY the week key. RESULT: 8-10 rows, columns (week, total).",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Bare string date literals: real SuiteQL needs TO_DATE with an explicit mask; an AU account's DD/MM/YYYY date preference silently misparses comparisons written MM/DD-style."
+    },
+    {
+      "id": "T05",
+      "category": "ar-aging",
+      "question": "give me an AR aging with 0-30, 31-60, 61-90 and 90+ buckets by customer",
+      "expected_outcome": "transaction (type='CustInvc' AND status='open') joined to customer; age computed as SYSDATE - trandate (catalog has no duedate); pivoted SUM(CASE...) per bucket per customer, or long-form (customer,bucket,amount) rows spanning all four buckets; a per-customer total desirable.",
+      "validation_predicate": "SQL: tables transaction+customer; matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; boundary literals 30, 60 AND 90 all appear in CASE/filter logic; age derived from SYSDATE/CURRENT_DATE minus trandate; does NOT match /duedate|daysoverdue|amountremaining|foreignamountunpaid/i (columns absent from catalog). RESULT: one row per customer with >=4 numeric bucket columns, or long-form rows covering 4 distinct buckets.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Real aging runs on duedate and foreignamountunpaid/amountremaining \u2014 none exist in this catalog, so hallucinating t.duedate throws 'field not found'; using full foreigntotal overstates partially paid invoices."
+    },
+    {
+      "id": "T06",
+      "category": "ar-aging",
+      "question": "which customers currently owe us more than $50,000?",
+      "expected_outcome": "Open CustInvc grouped by customer with HAVING SUM(foreigntotal) > 50000, sorted descending; a stated assumption on whether unapplied credit memos net against the balance is acceptable either way.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; joins customer; GROUP BY a customer identifier; HAVING (or outer filter) comparing an aggregate to 50000. RESULT: columns (customer, balance); every balance > 50000.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "status='open' is demo-only \u2014 live SuiteQL statuses are composite codes like 'CustInvc:A', so the literal 'open' returns zero rows on a real account; ignoring unapplied credits also overstates what customers owe."
+    },
+    {
+      "id": "T07",
+      "category": "ar-aging",
+      "question": "outstanding AR by subsidiary converted to AUD",
+      "expected_outcome": "Open CustInvc joined to subsidiary; SUM(foreigntotal * exchangerate) as the AUD figure; GROUP BY subsidiary name; optional local-currency subtotal alongside.",
+      "validation_predicate": "SQL: tables transaction+subsidiary; matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; contains /foreigntotal\\s*\\*\\s*(t\\.)?exchangerate/i (or reverse order); GROUP BY subsidiary name. RESULT: <=3 rows (AU/US/GB subsidiaries), columns (subsidiary, aud_amount).",
+      "difficulty": "medium",
+      "real_netsuite_trap": "transaction.exchangerate is the historical booking rate to the subsidiary base; a real consolidated AR balance uses period-end consolidated rates, so booking-rate sums never tie to the consolidation report."
+    },
+    {
+      "id": "T08",
+      "category": "ar-aging",
+      "question": "show invoices that have been open for more than 60 days with the customer's email, oldest first",
+      "expected_outcome": "Detail rows: type='CustInvc' AND status='open' AND trandate < SYSDATE-60 (or SYSDATE-trandate > 60); join customer selecting email; columns tranid/trandate/amount/email; ORDER BY trandate ASC.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; a 60-day age condition against trandate; joins customer; selects email; ORDER BY trandate ascending (or default); does NOT match /duedate/i. RESULT: detail rows, all trandates > 60 days before today, ascending.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Generators trained on real NetSuite reach for duedate or a daysopen virtual column \u2014 neither exists here; on live accounts aging keys off duedate, so trandate-based output won't match the AR aging report either."
+    },
+    {
+      "id": "T09",
+      "category": "pnl-gl-balances",
+      "question": "what's the balance of account 4000 for the Jul 2025 period?",
+      "expected_outcome": "transactionaccountingline JOIN account (acctnumber='4000') JOIN transaction JOIN accountingperiod ON t.postingperiod=ap.id AND ap.periodname='Jul 2025'; balance as SUM(credit)-SUM(debit) for an income account so revenue reads positive; single row.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction+accountingperiod all present; matches /acctnumber\\s*=\\s*'4000'/ AND /periodname\\s*=\\s*'Jul 2025'/; join uses /postingperiod/i; does NOT substitute a trandate BETWEEN range for the period; expression references both credit and debit columns. RESULT: 1 row, 1 signed numeric; positive under credit-minus-debit convention.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Filtering trandate to July instead of postingperiod misses backdated/late postings; SUM(debit-credit) sign-flips a revenue account negative \u2014 a classic pasted-into-the-board-deck error."
+    },
+    {
+      "id": "T10",
+      "category": "pnl-gl-balances",
+      "question": "total expenses by GL account for Jan through Mar 2026",
+      "expected_outcome": "transactionaccountingline + account with accttype='Expense' (COGS inclusion acceptable if stated) + transaction; period scope Jan-Mar 2026 (postingperiod join preferred, trandate range acceptable if stated); SUM(debit)-SUM(credit) per account; GROUP BY acctnumber/fullname; descending order.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction; accttype filter including /'Expense'/; date/period filter covering 2026-01-01..2026-03-31 or periodnames Jan/Feb/Mar 2026; GROUP BY account number or fullname; debit-minus-credit arithmetic. RESULT: one row per expense account; totals >= 0 under normal balances.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Without a posting filter a real account pulls non-posting documents into GL sums; answering from VendBill header totals instead of GL lines misclassifies bills coded to assets or COGS."
+    },
+    {
+      "id": "T11",
+      "category": "pnl-gl-balances",
+      "question": "net income for June 2026",
+      "expected_outcome": "GL-based: transactionaccountingline+account+transaction (+accountingperiod ideally); SUM(CASE Income: credit-debit) minus SUM(CASE COGS/Expense: debit-credit) scoped to Jun 2026 (periodname='Jun 2026' or trandate range); single row. Header foreigntotal is not an acceptable P&L source.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction present; matches /'Income'/ AND (/'Expense'/ OR /'COGS'/) in accttype logic; a Jun 2026 filter (periodname or date range); arithmetic combines income and expense sides with opposite signs. RESULT: 1 row, 1 signed numeric.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Computing 'income' from invoice headers ignores COGS recognition, journals and non-invoice postings; including Bank/AcctRec/AcctPay accttypes turns the figure into balance-sheet noise."
+    },
+    {
+      "id": "T12",
+      "category": "ap-vendor-spend",
+      "question": "how much have we spent with Logistics vendors this year?",
+      "expected_outcome": "type='VendBill'; JOIN vendor ON v.id=t.entity with v.category='Logistics'; trandate >= 2026-01-01 (calendar-year assumption stated); SUM(foreigntotal) as scalar or per-vendor breakdown. Must join vendor, not customer.",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'VendBill'/i; joins vendor (NOT customer) on entity; matches /category\\s*=\\s*'Logistics'/; 2026 YTD filter; does NOT mix /'PurchOrd'|'VendPymt'/ into the same sum. RESULT: 1 aggregate row or one row per logistics vendor.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "transaction.entity serves both customer and vendor ids \u2014 joining customer.id compiles fine and silently returns empty/garbage; counting POs (unposted commitments) or payments alongside bills double-counts spend."
+    },
+    {
+      "id": "T13",
+      "category": "ap-vendor-spend",
+      "question": "monthly AP spend by vendor category over the last 6 months",
+      "expected_outcome": "type='VendBill'; join vendor; GROUP BY month(trandate) and v.category; filter trandate >= ADD_MONTHS(SYSDATE,-6) (roughly Jan-Jul 2026); ordered by month then category.",
+      "validation_predicate": "SQL: matches /'VendBill'/; joins vendor; GROUP BY includes both a month expression and vendor category; rolling 6-month filter (ADD_MONTHS/SYSDATE) or explicit >= Jan 2026 bound. RESULT: columns (month, category, spend); category values drawn from Inventory/Logistics/Office/Services/Utilities.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Category lives on the vendor record, not the transaction \u2014 models invent t.category; including PurchOrd inflates 'spend' with commitments that never posted to AP."
+    },
+    {
+      "id": "T14",
+      "category": "ap-vendor-spend",
+      "question": "which vendors did we actually pay more than $20k in Q2 2026?",
+      "expected_outcome": "'Actually pay' = cash out: type='VendPymt', join vendor, trandate 2026-04-01..2026-06-30, GROUP BY vendor HAVING SUM(foreigntotal) > 20000. A VendBill-based reading is acceptable only with an explicitly stated assumption that bills approximate payments.",
+      "validation_predicate": "SQL: matches /'VendPymt'/ (OR matches /'VendBill'/ AND the response/SQL comment contains an explicit assumption statement); joins vendor; date bounds Apr 1 2026 and Jun 30 2026; aggregate compared to 20000. RESULT: (vendor, paid_total) rows all > 20000.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "On live accounts payment transactions carry negative or zero header totals and settle bills via applied links \u2014 HAVING SUM(total) > 20000 on raw payment headers returns nothing; bills-vs-payments is exactly the distinction naive generators blur."
+    },
+    {
+      "id": "T15",
+      "category": "topn-fetch-first",
+      "question": "top 5 items by 2026 invoice revenue, and include ties for 5th place",
+      "expected_outcome": "transactionline+item+transaction; type='CustInvc'; 2026 filter; SUM(netamount) per item; tie handling via RANK()/DENSE_RANK() <= 5 in an outer filter, or FETCH FIRST 5 ROWS WITH TIES; ordered by revenue desc.",
+      "validation_predicate": "SQL: tables transactionline+item+transaction; matches /'CustInvc'/; 2026 filter; matches (/WITH\\s+TIES/i OR /\\b(DENSE_)?RANK\\s*\\(/i); does NOT rely on a bare /FETCH\\s+FIRST\\s+5\\s+ROWS\\s+ONLY/i without rank logic; does NOT match /\\bLIMIT\\b/i. RESULT: >=5 rows; every returned revenue >= the 5th-ranked value.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "FETCH FIRST 5 ROWS ONLY silently drops tied items; LIMIT/TOP are not SuiteQL. On a real account invoice income lines carry NEGATIVE netamount, so ORDER BY SUM(netamount) DESC surfaces the worst sellers unless the sign is flipped."
+    },
+    {
+      "id": "T16",
+      "category": "topn-fetch-first",
+      "question": "show me the 3 largest invoices we've ever issued",
+      "expected_outcome": "transaction type='CustInvc'; ORDER BY foreigntotal DESC; FETCH FIRST 3 ROWS ONLY; detail columns tranid/trandate/amount; customer name join desirable.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; ORDER BY the total descending; matches /FETCH\\s+FIRST\\s+3\\s+ROWS?\\s+ONLY/i; does NOT match /\\bLIMIT\\b/i or /\\bTOP\\s+3\\b/i. RESULT: exactly 3 rows sorted descending by amount.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "LIMIT 3 (MySQL/Postgres) and TOP 3 (T-SQL) both throw syntax errors in SuiteQL \u2014 Oracle-style FETCH FIRST is mandatory."
+    },
+    {
+      "id": "T17",
+      "category": "topn-fetch-first",
+      "question": "bottom 10 customers by 2025 invoice revenue \u2014 only customers who actually got invoiced",
+      "expected_outcome": "INNER JOIN customer to transaction; type='CustInvc'; 2025 range; GROUP BY customer; ORDER BY revenue ASC; FETCH FIRST 10 ROWS ONLY. The 'actually got invoiced' clause makes INNER (not LEFT) join correct.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; 2025 filter; GROUP BY customer; ORDER BY the aggregate ascending; matches /FETCH\\s+FIRST\\s+10/i; customer join is INNER (no LEFT JOIN preserving un-invoiced customers). RESULT: 10 rows, all revenue > 0, ascending order.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "A reflexive LEFT JOIN drags never-invoiced customers in as NULL/zero rows, contradicting the request; ties at the 10th slot get cut arbitrarily without a deterministic tiebreaker."
+    },
+    {
+      "id": "T18",
+      "category": "period-vs-trandate",
+      "question": "revenue posted to the Mar 2026 accounting period, even where the transaction date fell in a different month",
+      "expected_outcome": "MUST resolve the period via t.postingperiod -> accountingperiod with periodname='Mar 2026'; revenue filter type='CustInvc' (or GL Income variant); trandate must NOT appear as a range filter doing the period's job; scalar or period-keyed rows.",
+      "validation_predicate": "SQL: table accountingperiod present; /postingperiod/i used in a join or IN-subquery; matches /periodname\\s*=\\s*'Mar 2026'/; revenue filter (/'CustInvc'/ or Income accttype logic); trandate does NOT appear in a WHERE range predicate (SELECT-list display allowed). RESULT: 1 aggregate row (or rows keyed only by the period).",
+      "difficulty": "hard",
+      "real_netsuite_trap": "trandate BETWEEN 1 Mar and 31 Mar is the classic wrong answer \u2014 backdated and late-posted entries diverge from it; and the period name must match NetSuite's exact format ('Mar 2026', not 'March 2026')."
+    },
+    {
+      "id": "T19",
+      "category": "period-vs-trandate",
+      "question": "which accounting periods are still open, and how much invoice revenue is posted into each?",
+      "expected_outcome": "accountingperiod WHERE closed='F'; LEFT JOIN transaction ON postingperiod match with type='CustInvc' inside the ON clause (or pre-filtered subquery); GROUP BY periodname; open periods with zero postings still listed; ordered by startdate.",
+      "validation_predicate": "SQL: matches /closed\\s*=\\s*'F'/; LEFT (OUTER) JOIN to transaction or a correlated subquery keyed on postingperiod; the CustInvc condition NOT placed in a bare outer WHERE on the transaction side; GROUP BY period. RESULT: exactly 4 rows (Apr 2026, May 2026, Jun 2026, Jul 2026); amounts >= 0 with NULL/COALESCE tolerated for empty periods.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "closed is a 'T'/'F' string, not a boolean (closed = false errors out); INNER JOIN or WHERE t.type='CustInvc' after the LEFT JOIN drops the zero-activity future periods the controller asked about."
+    },
+    {
+      "id": "T20",
+      "category": "period-vs-trandate",
+      "question": "for Q1 2026 compare invoice totals by transaction-date month vs by posting period \u2014 I want to spot backdated postings",
+      "expected_outcome": "Two aggregations over CustInvc Jan-Mar 2026: one keyed on TO_CHAR(trandate,'YYYY-MM'), one keyed on accountingperiod.periodname via postingperiod; presented side-by-side (FULL/LEFT join of two subqueries or a labeled UNION), ideally with a difference column.",
+      "validation_predicate": "SQL: contains BOTH a trandate-derived month expression AND a postingperiod->accountingperiod join; matches /'CustInvc'/; Q1 2026 bounds applied to each side. RESULT: per month/period two comparable totals (two numeric columns, or labeled rows) covering Jan-Mar 2026 such that a difference is computable.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Treating trandate month and posting period as interchangeable is precisely the bug being probed; aligning the keys also trips models \u2014 '2026-01' and 'Jan 2026' never join as raw strings without an explicit mapping."
+    },
+    {
+      "id": "T21",
+      "category": "dimension-grouping",
+      "question": "break down 2026 invoice revenue by product line",
+      "expected_outcome": "transactionline JOIN classification ON l.class JOIN transaction (type='CustInvc', 2026); SUM(netamount) GROUP BY classification.name yielding Hardware/Software/Services. Must source class from the line, not the header and not item.class.",
+      "validation_predicate": "SQL: tables transactionline+classification+transaction; classification joined from transactionline.class (NOT transaction.class which doesn't exist, NOT item.class); matches /'CustInvc'/; 2026 filter; GROUP BY classification name. RESULT: <=3 rows named among Hardware/Software/Services.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "No class column exists on the transaction header in this catalog \u2014 t.class throws field-not-found; joining item.class instead of the line's class dimension misattributes lines re-classed at entry."
+    },
+    {
+      "id": "T22",
+      "category": "dimension-grouping",
+      "question": "invoice revenue by location and subsidiary so far this year",
+      "expected_outcome": "transaction header joined to location and subsidiary; type='CustInvc'; trandate 2026-01-01..today; GROUP BY subsidiary.name, location.name; SUM(foreigntotal) (AUD conversion a bonus).",
+      "validation_predicate": "SQL: joins to location AND subsidiary from the transaction header (t.location, t.subsidiary); matches /'CustInvc'/; 2026 YTD filter; GROUP BY both dimension names. RESULT: columns (subsidiary, location, revenue); each location consistent with its owning subsidiary.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "location exists on both header and line \u2014 mixing line-level location with header foreigntotal fans out and double-counts; grouping by raw ids instead of joined names ships an unreadable report."
+    },
+    {
+      "id": "T23",
+      "category": "dimension-grouping",
+      "question": "netamount by department and class for the Professional Services department this year",
+      "expected_outcome": "transactionline JOIN department ON l.department (d.name='Professional Services') JOIN classification ON l.class JOIN transaction (2026; revenue-type filter or stated all-transaction-types assumption); SUM(netamount) GROUP BY department + class.",
+      "validation_predicate": "SQL: tables transactionline+department+classification+transaction; matches /name\\s*=\\s*'Professional Services'/ exactly; 2026 filter; GROUP BY includes classification name; department and class sourced from transactionline columns. RESULT: rows only for Professional Services; <=3 class rows.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Department hangs off the line, not the header, in this catalog; the filter string must match exactly ('Professional Services', not 'Prof Services' or a LIKE guess) \u2014 and in real accounts line department can differ from the header default."
+    },
+    {
+      "id": "T24",
+      "category": "dimension-grouping",
+      "question": "2026 invoice revenue grouped by the sales rep's department",
+      "expected_outcome": "transaction (CustInvc, 2026) LEFT JOIN employee ON t.employee, JOIN department ON e.department; GROUP BY department.name; rep-less invoices preserved via LEFT JOIN + COALESCE('Unassigned') or their exclusion explicitly stated. Two-hop join through employee is mandatory \u2014 not transactionline.department.",
+      "validation_predicate": "SQL: two-hop join transaction->employee->department via employee.department (NOT transactionline.department); matches /'CustInvc'/; 2026 filter; GROUP BY department name; LEFT JOIN or COALESCE present, OR the response states rep-less invoices are excluded. RESULT: (department, revenue) rows; with LEFT JOIN the grand total ties to total 2026 invoice revenue.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "t.employee is NULL on many transactions \u2014 an inner join silently deletes revenue so the report no longer ties to the revenue total; grouping by line department answers a different question entirely."
+    },
+    {
+      "id": "T25",
+      "category": "multi-currency",
+      "question": "2025 invoice revenue by transaction currency with the AUD-converted total for each",
+      "expected_outcome": "transaction JOIN currency ON t.currency; type='CustInvc'; 2025 range; GROUP BY currency.name; two measures: SUM(foreigntotal) local and SUM(foreigntotal*exchangerate) AUD.",
+      "validation_predicate": "SQL: currency table joined; matches /'CustInvc'/; 2025 filter; contains both a raw SUM(foreigntotal) and a SUM including /\\*\\s*(t\\.)?exchangerate/i; GROUP BY currency name. RESULT: <=4 rows (AUD/USD/GBP/EUR) with two numeric columns; the AUD row's two values are equal.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "In a real account transaction.exchangerate converts to the SUBSIDIARY's base currency, not group AUD \u2014 cross-subsidiary 'AUD' sums need consolidated exchange rates, and the naive figure ties to no report."
+    },
+    {
+      "id": "T26",
+      "category": "multi-currency",
+      "question": "list open USD invoices with the amount in USD and what that is in AUD",
+      "expected_outcome": "transaction JOIN currency with name='USD'; type='CustInvc'; status='open'; detail rows with tranid, foreigntotal (USD), and foreigntotal*exchangerate labelled AUD.",
+      "validation_predicate": "SQL: currency filtered by /name\\s*=\\s*'USD'/ via join or subquery (NOT a bare hardcoded numeric currency id with no name lookup); matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; contains /\\*\\s*(t\\.)?exchangerate/i. RESULT: detail rows where aud_amount = usd_amount * exchangerate for every row.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Hardcoding the currency internal id (id=2 etc.) breaks across accounts where ids differ; labelling raw foreigntotal as AUD is a silent unit error."
+    },
+    {
+      "id": "T27",
+      "category": "multi-currency",
+      "question": "rank subsidiaries by Q2 2026 invoice revenue in AUD, and show how much of each one's revenue was billed in a currency other than its own base currency",
+      "expected_outcome": "transaction JOIN subsidiary; compare t.currency vs s.currency; measures: SUM(foreigntotal*exchangerate) total AUD, plus SUM(CASE WHEN t.currency <> s.currency THEN foreigntotal*exchangerate ELSE 0 END) foreign-billed portion; type='CustInvc'; trandate 2026-04-01..2026-06-30; GROUP BY subsidiary; ORDER BY AUD total DESC.",
+      "validation_predicate": "SQL: subsidiary joined; a predicate comparing t.currency with s.currency (both column refs inside one <> or = comparison); matches /'CustInvc'/; Q2 2026 bounds; exchangerate multiplication; GROUP BY subsidiary; ORDER BY the AUD aggregate descending. RESULT: <=3 rows; foreign_billed <= total_aud in every row.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Assuming transaction currency equals the subsidiary base is the classic multi-currency error; in real accounts the booking rate converts to the sub's own base, so a group-AUD figure for a US subsidiary needs triangulated/consolidated rates."
+    },
+    {
+      "id": "T28",
+      "category": "inventory-availability",
+      "question": "which items have fewer than 20 units available at any location?",
+      "expected_outcome": "inventorybalance JOIN item and location; filter quantityavailable < 20 (available, NOT onhand); detail rows itemid/displayname/location/quantityavailable.",
+      "validation_predicate": "SQL: table inventorybalance present; the filter targets /quantityavailable\\s*<\\s*20/ (NOT quantityonhand in the filter); joins item AND location; selects an item identifier. RESULT: rows where quantityavailable < 20.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "quantityonhand vs quantityavailable \u2014 onhand ignores open sales-order commitments, so filtering it tells the buyer the wrong thing; real accounts also spread availability across bins/statuses rather than one tidy table."
+    },
+    {
+      "id": "T29",
+      "category": "inventory-availability",
+      "question": "total available stock per inventory item across all locations, including items with no inventory rows",
+      "expected_outcome": "item (filtered itemtype='InvtPart') LEFT JOIN inventorybalance; SUM(quantityavailable) with COALESCE/NVL to 0; GROUP BY item; items lacking any balance rows appear with 0/NULL.",
+      "validation_predicate": "SQL: LEFT JOIN with item as the preserved side (item FROM-first LEFT JOIN inventorybalance, or equivalent); matches /itemtype\\s*=\\s*'InvtPart'/; COALESCE|NVL around the sum (or NULL deliberately surfaced); GROUP BY item. RESULT: one row per InvtPart item, including zero/NULL-stock items.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "INNER JOIN hides exactly the stocked-out items the question is about; omitting the InvtPart filter pads the list with Service/NonInvtPart rows that can never hold stock."
+    },
+    {
+      "id": "T30",
+      "category": "inventory-availability",
+      "question": "for each item, do we have enough stock on hand to cover open sales order demand?",
+      "expected_outcome": "Demand = SUM(l.quantity) from transactionline+transaction where type='SalesOrd' and status in ('pendingFulfillment','open'), per item. Supply = SUM(quantityonhand) per item from inventorybalance (onhand, because quantityavailable already nets commitments). Both pre-aggregated in subqueries/CTEs, then joined on item; output demand, onhand, and a shortfall difference or covered flag.",
+      "validation_predicate": "SQL: matches /'SalesOrd'/ with a status filter; transactionline quantity aggregated per item; inventorybalance aggregated per item in a SEPARATE subquery/CTE before joining (no direct line-row-to-balance-row join); a comparison or difference between the two sums; supply side uses quantityonhand. RESULT: one row per item with demand, supply, and a comparable/boolean column; no item duplicated.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Two independent grains: joining SO lines directly to balance rows multiplies quantities by location count (fan-out); subtracting demand from quantityavailable double-counts commitments already netted out of 'available'."
+    },
+    {
+      "id": "T31",
+      "category": "grain-traps",
+      "question": "what's our average order value for sales orders placed in 2026?",
+      "expected_outcome": "Header grain only: AVG(t.foreigntotal) \u2014 or SUM(foreigntotal)/COUNT(DISTINCT t.id) \u2014 over transaction type='SalesOrd' with trandate in 2026; single row. transactionline must not distort the denominator.",
+      "validation_predicate": "SQL: matches /'SalesOrd'/; 2026 filter; AVG over the header total or SUM with COUNT(DISTINCT); transactionline table ABSENT \u2014 or if joined, the denominator uses COUNT(DISTINCT transaction id). RESULT: 1 row, 1 numeric equal to SUM(foreigntotal)/COUNT(DISTINCT id) of 2026 sales orders.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Joining lines repeats the header total per line and inflates AOV by the average line count \u2014 the canonical grain bug; SalesOrd also never posts, so any GL-based attempt returns nothing."
+    },
+    {
+      "id": "T32",
+      "category": "grain-traps",
+      "question": "on average, how many distinct SKUs are on each invoice?",
+      "expected_outcome": "Per-invoice COUNT(DISTINCT l.item) then AVG across invoices (nested aggregate or CTE), or equivalently COUNT(DISTINCT transaction-item pair)/COUNT(DISTINCT transaction); type='CustInvc'; single-row answer.",
+      "validation_predicate": "SQL: tables transactionline+transaction; matches /'CustInvc'/; /COUNT\\s*\\(\\s*DISTINCT/i applied to item at per-invoice grain via nested query, OR a ratio of two COUNT DISTINCT expressions; does NOT compute plain COUNT(*)/COUNT(DISTINCT transaction) with no DISTINCT on item. RESULT: 1 row, one numeric >= 1.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Counting lines instead of distinct items overstates SKU mix whenever an item appears on multiple lines of one invoice; the nested aggregation defeats single-SELECT generators."
+    },
+    {
+      "id": "T33",
+      "category": "grain-traps",
+      "question": "revenue by item class for 2026 with each class's percentage of total revenue",
+      "expected_outcome": "Line grain throughout: SUM(l.netamount) by classification for CustInvc 2026; percentage via SUM() OVER () window or a scalar subquery over the SAME filtered lines \u2014 numerator and denominator both from line netamount; percentages sum to ~100.",
+      "validation_predicate": "SQL: tables transactionline+classification+transaction; matches /'CustInvc'/; 2026 filter; ratio built from a window total (/OVER\\s*\\(\\s*\\)/) or scalar subquery over identically filtered lines; denominator NOT built from header foreigntotal. RESULT: <=3 class rows with amount and pct; pct values sum to 100 +/- 0.5.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Mixing a line-level numerator with a header-total denominator misstates shares \u2014 on real accounts headers include shipping/tax/discount amounts the class split excludes, so the percentages never total 100."
+    },
+    {
+      "id": "T34",
+      "category": "grain-traps",
+      "question": "by month in 2026: number of invoices and number of invoice line items",
+      "expected_outcome": "transaction JOIN transactionline; type='CustInvc'; 2026; GROUP BY month; invoices = COUNT(DISTINCT t.id), lines = COUNT(l.id) or COUNT(*); invoice_count <= line_count in every month.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; 2026 filter; GROUP BY a month expression; contains /COUNT\\s*\\(\\s*DISTINCT/i for the invoice metric alongside a separate non-distinct COUNT for lines. RESULT: <=12 rows; invoice_count <= line_count in every row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "After the join, COUNT(*) counts lines for BOTH metrics \u2014 invoice counts silently multiply by lines-per-invoice; the two metrics need different grains inside one query."
+    },
+    {
+      "id": "T35",
+      "category": "edge-negative",
+      "question": "net revenue per customer for 2025 after subtracting credit memos",
+      "expected_outcome": "transaction JOIN customer; type IN ('CustInvc','CustCred'); CASE negating CustCred amounts (or invoice-sum minus credits-sum); 2025 range; GROUP BY customer; over-credited customers may show negative net and must not be filtered out.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /'CustCred'/; an explicit negation bound to CustCred (/CASE[\\s\\S]*CustCred[\\s\\S]*THEN\\s*-/i or subtraction of a credits aggregate); customer join with GROUP BY; 2025 filter. RESULT: (customer, net) rows; negative values permitted in output.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "The demo stores credit-memo totals positive, so type IN (...) with a plain SUM ADDS credits to revenue; on real accounts sign conventions differ per table (header vs line vs GL), which is why consultants test one credit memo end-to-end first."
+    },
+    {
+      "id": "T36",
+      "category": "edge-negative",
+      "question": "invoice revenue by department for 2026 \u2014 show every department even if it booked nothing",
+      "expected_outcome": "department as preserved side, LEFT JOIN transactionline (+transaction) with type='CustInvc' AND 2026 conditions placed inside the ON clause or a pre-filtered subquery; COALESCE(SUM(netamount),0); all 4 departments always present in the output.",
+      "validation_predicate": "SQL: LEFT JOIN with department preserved; transaction-side conditions (type, date) located in the JOIN ON clause or a pre-filtered subquery \u2014 FAIL if a bare WHERE references t.type or t.trandate without an IS NULL escape; COALESCE|NVL present. RESULT: exactly 4 rows (Sales, Professional Services, Support, General & Administrative), zero-revenue departments showing 0.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "WHERE t.type='CustInvc' after a LEFT JOIN silently converts it to INNER, so the zero-revenue departments the question exists for disappear \u2014 the single most common outer-join bug in generated SQL."
+    },
+    {
+      "id": "T37",
+      "category": "edge-negative",
+      "question": "average selling price per unit by item for 2026 invoice lines \u2014 don't divide by zero if quantities net out",
+      "expected_outcome": "SUM(netamount)/NULLIF(SUM(quantity),0) per item over transactionline+item+transaction; type='CustInvc'; 2026; items whose quantities net to zero return NULL (or a CASE-handled marker), never an error.",
+      "validation_predicate": "SQL: division whose denominator is wrapped in NULLIF(...,0) or guarded by CASE WHEN SUM(quantity)=0 (matches /NULLIF\\s*\\(\\s*SUM|CASE\\s+WHEN\\s+SUM\\s*\\(\\s*(l\\.)?quantity/i); matches /'CustInvc'/; 2026 filter; GROUP BY item; no unguarded /\\/\\s*SUM\\s*\\(\\s*(l\\.)?quantity/i. RESULT: per-item rows; zero-net-quantity items yield NULL/flag rather than query failure.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Return/credit lines can net an item's quantity to exactly 0 \u2014 unguarded division throws ORA-01476 on live data and kills the entire report, not just that row."
+    },
+    {
+      "id": "T38",
+      "category": "ambiguous-assumptions",
+      "question": "what was our revenue last quarter?",
+      "expected_outcome": "An explicit stated assumption (revenue = customer invoices; last quarter = 2026-04-01..2026-06-30 \u2014 calendar Q2, which coincides with AU FY Q4 here), then SUM over CustInvc in that range; netting CustCred acceptable if declared; SalesOrd and CustPymt are unacceptable measures.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ (optionally plus CustCred with negation); date bounds Apr 1 2026 AND Jun 30 2026 (or periodnames Apr/May/Jun 2026); does NOT include /'SalesOrd'|'CustPymt'/ in the revenue measure. RESPONSE: prose or SQL comment states the interpretation (matches /assum|interpret|defin|treating|=\\s*invoices/i). RESULT: 1 aggregate row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "'Last quarter' is fiscal-calendar dependent per account (AU FY starts 1 July); 'revenue' read as cash receipts (CustPymt) or bookings (SalesOrd) gives confidently wrong numbers \u2014 the acceptable answer names its definition."
+    },
+    {
+      "id": "T39",
+      "category": "ambiguous-assumptions",
+      "question": "how much money did we make in June?",
+      "expected_outcome": "Interpretation stated, then either (a) net income for Jun 2026 from GL (Income credit-debit minus COGS/Expense debit-credit \u2014 the stronger reading of 'make'), or (b) invoice revenue for Jun 2026 \u2014 each acceptable only with the assumption declared; 'June' must resolve to the most recent June (2026), and CustPymt cash collected is not an acceptable measure.",
+      "validation_predicate": "SQL: EITHER [tables transactionaccountingline+account with /'Income'/ and /'Expense'|'COGS'/ logic] OR [/'CustInvc'/ header sum]; a Jun 2026 filter (periodname='Jun 2026' or a 2026 date range \u2014 not 2025); does NOT use /'CustPymt'/ as the measure. RESPONSE: explicit assumption statement present (matches /assum|interpret|net income|profit|revenue\\s*=/i). RESULT: 1 aggregate row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "'Made' as cash collected (CustPymt) is the tempting wrong turn; silently picking June 2025 because it feels 'complete' also fails the user \u2014 the year choice must be stated."
+    },
+    {
+      "id": "T40",
+      "category": "ambiguous-assumptions",
+      "question": "show me sales by region for this financial year",
+      "expected_outcome": "Three ambiguities resolved and stated: sales = CustInvc revenue (SalesOrd bookings only if explicitly labelled as bookings); region = customer.territory (APAC/EMEA/AMER \u2014 the only region-like field; subsidiary.country acceptable with reasoning); financial year = an explicit dated range (AU FY starting 1 July is the natural pick for an AUD-based account \u2014 either FY26 Jul 2025-Jun 2026 or FY27-to-date from Jul 2026 \u2014 calendar year acceptable if declared). GROUP BY territory with summed revenue.",
+      "validation_predicate": "SQL: groups by /territory/ (or subsidiary country with stated rationale); matches /'CustInvc'/ (SalesOrd only if explicitly labelled bookings in the response); a contiguous explicit FY or FY-to-date trandate/period range whose bounds are stated in the response; no source-column reference to a nonexistent region field like /c(ustomer)?\\.region/i (alias 'AS region' permitted). RESULT: <=3 rows keyed APAC/EMEA/AMER with revenue totals.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "No 'region' column exists \u2014 generators hallucinate customer.region; fiscal year start varies per account (AU: 1 July), so an undeclared calendar-year guess silently reports the wrong period."
+    }
+  ]
+}

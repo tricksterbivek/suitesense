@@ -1,0 +1,364 @@
+{
+  "cases": [
+    {
+      "id": "T01",
+      "category": "revenue-rollups",
+      "question": "What was our total invoice revenue in Q1 2026?",
+      "expected_outcome": "Single aggregate from transaction headers: must filter type='CustInvc' AND a date scope resolving to 2026-01-01..2026-03-31 (trandate range, or postingperiod join to Jan/Feb/Mar 2026 periods). SUM(foreigntotal) minimally acceptable; a consultant prefers SUM(foreigntotal*exchangerate) labelled AUD or an explicit currency-mix caveat. Must not include SalesOrd or CustPymt.",
+      "validation_predicate": "SQL: table 'transaction' present; matches /type\\s*=\\s*'CustInvc'/i; contains a date/period filter bounding Jan 1 2026 and Mar 31 2026 in any format, OR periodname IN ('Jan 2026','Feb 2026','Mar 2026'); does NOT match /'SalesOrd'|'CustPymt'/. RESULT: exactly 1 row with 1 numeric aggregate (label columns allowed).",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Summing foreigntotal across AUD/USD/GBP/EUR transactions without exchangerate yields a meaningless mixed-currency number in any real multi-subsidiary account."
+    },
+    {
+      "id": "T02",
+      "category": "revenue-rollups",
+      "question": "monthly net revenue for the trailing 12 months, counting credit memos as negative",
+      "expected_outcome": "transaction table; type IN ('CustInvc','CustCred') with a CASE (or signed UNION) negating CustCred amounts; GROUP BY month of trandate; rolling filter trandate >= ADD_MONTHS(SYSDATE,-12) or explicit Jul 2025 onward; ordered by month.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /'CustCred'/; a negation construct bound to CustCred (e.g. /CASE[\\s\\S]*CustCred[\\s\\S]*THEN\\s*-/i or subtraction of a credits aggregate); a month-bucket expression on trandate in GROUP BY; a rolling-12-month filter (ADD_MONTHS/SYSDATE) or explicit >= Jul 2025 bound. RESULT: 12-13 rows, columns (month, net_amount).",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Credit memo totals are stored as positive numbers \u2014 adding instead of subtracting them overstates revenue. The nearest few-shot ('Monthly invoice revenue trend') anchors the model to CustInvc-only with no credit netting."
+    },
+    {
+      "id": "T03",
+      "category": "revenue-rollups",
+      "question": "how much did we invoice last month",
+      "expected_outcome": "type='CustInvc'; calendar month before today (Jun 2026): bounded first-through-last day via TRUNC(SYSDATE,'MM')/ADD_MONTHS arithmetic, explicit 2026-06-01..2026-06-30, or periodname='Jun 2026'; single SUM(foreigntotal).",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'CustInvc'/i; month-bounded filter resolving to Jun 1-30 2026 (SYSDATE month arithmetic, explicit dates, or periodname='Jun 2026'); does NOT use a rolling /SYSDATE\\s*-\\s*30/ window. RESULT: 1 row, 1 numeric aggregate.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "'Last month' generated as a SYSDATE-30 rolling window instead of the prior calendar month \u2014 the figure never ties to the Jun 2026 period close and drifts day by day."
+    },
+    {
+      "id": "T04",
+      "category": "revenue-rollups",
+      "question": "weekly invoiced totals from 1 May 2026 to 30 June 2026",
+      "expected_outcome": "type='CustInvc'; trandate >= 2026-05-01 AND trandate <= 2026-06-30; GROUP BY week bucket (TO_CHAR(trandate,'IYYY-IW') or TRUNC(trandate,'IW')); ordered by week key.",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'CustInvc'/i; both boundary dates (May 1 2026 and Jun 30 2026) present in any parseable format; a week-grouping expression (/IW|WW/i inside TO_CHAR or TRUNC); ORDER BY the week key. RESULT: 8-10 rows, columns (week, total).",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Bare string date literals: real SuiteQL needs TO_DATE with an explicit mask; an AU account's DD/MM/YYYY date preference silently misparses comparisons written MM/DD-style."
+    },
+    {
+      "id": "T05",
+      "category": "ar-aging",
+      "question": "give me an AR aging with 0-30, 31-60, 61-90 and 90+ buckets by customer",
+      "expected_outcome": "transaction (type='CustInvc' AND status='open') joined to customer; age computed as SYSDATE - trandate (catalog has no duedate); pivoted SUM(CASE...) per bucket per customer, or long-form (customer,bucket,amount) rows spanning all four buckets; a per-customer total desirable.",
+      "validation_predicate": "SQL: tables transaction+customer; matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; boundary literals 30, 60 AND 90 all appear in CASE/filter logic; age derived from SYSDATE/CURRENT_DATE minus trandate; does NOT match /duedate|daysoverdue|amountremaining|foreignamountunpaid/i (columns absent from catalog). RESULT: one row per customer with >=4 numeric bucket columns, or long-form rows covering 4 distinct buckets.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Real aging runs on duedate and foreignamountunpaid/amountremaining \u2014 none exist in this catalog, so hallucinating t.duedate throws 'field not found'; using full foreigntotal overstates partially paid invoices."
+    },
+    {
+      "id": "T06",
+      "category": "ar-aging",
+      "question": "which customers currently owe us more than $50,000?",
+      "expected_outcome": "Open CustInvc grouped by customer with HAVING SUM(foreigntotal) > 50000, sorted descending; a stated assumption on whether unapplied credit memos net against the balance is acceptable either way.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; joins customer; GROUP BY a customer identifier; HAVING (or outer filter) comparing an aggregate to 50000. RESULT: columns (customer, balance); every balance > 50000.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "status='open' is demo-only \u2014 live SuiteQL statuses are composite codes like 'CustInvc:A', so the literal 'open' returns zero rows on a real account; ignoring unapplied credits also overstates what customers owe."
+    },
+    {
+      "id": "T07",
+      "category": "ar-aging",
+      "question": "outstanding AR by subsidiary converted to AUD",
+      "expected_outcome": "Open CustInvc joined to subsidiary; SUM(foreigntotal * exchangerate) as the AUD figure; GROUP BY subsidiary name; optional local-currency subtotal alongside.",
+      "validation_predicate": "SQL: tables transaction+subsidiary; matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; contains /foreigntotal\\s*\\*\\s*(t\\.)?exchangerate/i (or reverse order); GROUP BY subsidiary name. RESULT: <=3 rows (AU/US/GB subsidiaries), columns (subsidiary, aud_amount).",
+      "difficulty": "medium",
+      "real_netsuite_trap": "transaction.exchangerate is the historical booking rate to the subsidiary base; a real consolidated AR balance uses period-end consolidated rates, so booking-rate sums never tie to the consolidation report."
+    },
+    {
+      "id": "T08",
+      "category": "ar-aging",
+      "question": "show invoices that have been open for more than 60 days with the customer's email, oldest first",
+      "expected_outcome": "Detail rows: type='CustInvc' AND status='open' AND trandate < SYSDATE-60 (or SYSDATE-trandate > 60); join customer selecting email; columns tranid/trandate/amount/email; ORDER BY trandate ASC.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; a 60-day age condition against trandate; joins customer; selects email; ORDER BY trandate ascending (or default); does NOT match /duedate/i. RESULT: detail rows, all trandates > 60 days before today, ascending.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Generators trained on real NetSuite reach for duedate or a daysopen virtual column \u2014 neither exists here; on live accounts aging keys off duedate, so trandate-based output won't match the AR aging report either."
+    },
+    {
+      "id": "T09",
+      "category": "pnl-gl-balances",
+      "question": "what's the balance of account 4000 for the Jul 2025 period?",
+      "expected_outcome": "transactionaccountingline JOIN account (acctnumber='4000') JOIN transaction JOIN accountingperiod ON t.postingperiod=ap.id AND ap.periodname='Jul 2025'; balance as SUM(credit)-SUM(debit) for an income account so revenue reads positive; single row.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction+accountingperiod all present; matches /acctnumber\\s*=\\s*'4000'/ AND /periodname\\s*=\\s*'Jul 2025'/; join uses /postingperiod/i; does NOT substitute a trandate BETWEEN range for the period; expression references both credit and debit columns. RESULT: 1 row, 1 signed numeric; positive under credit-minus-debit convention.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Filtering trandate to July instead of postingperiod misses backdated/late postings; SUM(debit-credit) sign-flips a revenue account negative \u2014 a classic pasted-into-the-board-deck error."
+    },
+    {
+      "id": "T10",
+      "category": "pnl-gl-balances",
+      "question": "total expenses by GL account for Jan through Mar 2026",
+      "expected_outcome": "transactionaccountingline + account with accttype='Expense' (COGS inclusion acceptable if stated) + transaction; period scope Jan-Mar 2026 (postingperiod join preferred, trandate range acceptable if stated); SUM(debit)-SUM(credit) per account; GROUP BY acctnumber/fullname; descending order.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction; accttype filter including /'Expense'/; date/period filter covering 2026-01-01..2026-03-31 or periodnames Jan/Feb/Mar 2026; GROUP BY account number or fullname; debit-minus-credit arithmetic. RESULT: one row per expense account; totals >= 0 under normal balances.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Without a posting filter a real account pulls non-posting documents into GL sums; answering from VendBill header totals instead of GL lines misclassifies bills coded to assets or COGS."
+    },
+    {
+      "id": "T11",
+      "category": "pnl-gl-balances",
+      "question": "net income for June 2026",
+      "expected_outcome": "GL-based: transactionaccountingline+account+transaction (+accountingperiod ideally); SUM(CASE Income: credit-debit) minus SUM(CASE COGS/Expense: debit-credit) scoped to Jun 2026 (periodname='Jun 2026' or trandate range); single row. Header foreigntotal is not an acceptable P&L source.",
+      "validation_predicate": "SQL: tables transactionaccountingline+account+transaction present; matches /'Income'/ AND (/'Expense'/ OR /'COGS'/) in accttype logic; a Jun 2026 filter (periodname or date range); arithmetic combines income and expense sides with opposite signs. RESULT: 1 row, 1 signed numeric.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Computing 'income' from invoice headers ignores COGS recognition, journals and non-invoice postings; including Bank/AcctRec/AcctPay accttypes turns the figure into balance-sheet noise."
+    },
+    {
+      "id": "T12",
+      "category": "ap-vendor-spend",
+      "question": "how much have we spent with Logistics vendors this year?",
+      "expected_outcome": "type='VendBill'; JOIN vendor ON v.id=t.entity with v.category='Logistics'; trandate >= 2026-01-01 (calendar-year assumption stated); SUM(foreigntotal) as scalar or per-vendor breakdown. Must join vendor, not customer.",
+      "validation_predicate": "SQL: matches /type\\s*=\\s*'VendBill'/i; joins vendor (NOT customer) on entity; matches /category\\s*=\\s*'Logistics'/; 2026 YTD filter; does NOT mix /'PurchOrd'|'VendPymt'/ into the same sum. RESULT: 1 aggregate row or one row per logistics vendor.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "transaction.entity serves both customer and vendor ids \u2014 joining customer.id compiles fine and silently returns empty/garbage; counting POs (unposted commitments) or payments alongside bills double-counts spend."
+    },
+    {
+      "id": "T13",
+      "category": "ap-vendor-spend",
+      "question": "monthly AP spend by vendor category over the last 6 months",
+      "expected_outcome": "type='VendBill'; join vendor; GROUP BY month(trandate) and v.category; filter trandate >= ADD_MONTHS(SYSDATE,-6) (roughly Jan-Jul 2026); ordered by month then category.",
+      "validation_predicate": "SQL: matches /'VendBill'/; joins vendor; GROUP BY includes both a month expression and vendor category; rolling 6-month filter (ADD_MONTHS/SYSDATE) or explicit >= Jan 2026 bound. RESULT: columns (month, category, spend); category values drawn from Inventory/Logistics/Office/Services/Utilities.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Category lives on the vendor record, not the transaction \u2014 models invent t.category; including PurchOrd inflates 'spend' with commitments that never posted to AP."
+    },
+    {
+      "id": "T14",
+      "category": "ap-vendor-spend",
+      "question": "which vendors did we actually pay more than $20k in Q2 2026?",
+      "expected_outcome": "'Actually pay' = cash out: type='VendPymt', join vendor, trandate 2026-04-01..2026-06-30, GROUP BY vendor HAVING SUM(foreigntotal) > 20000. A VendBill-based reading is acceptable only with an explicitly stated assumption that bills approximate payments.",
+      "validation_predicate": "SQL: matches /'VendPymt'/ (OR matches /'VendBill'/ AND the response/SQL comment contains an explicit assumption statement); joins vendor; date bounds Apr 1 2026 and Jun 30 2026; aggregate compared to 20000. RESULT: (vendor, paid_total) rows all > 20000.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "On live accounts payment transactions carry negative or zero header totals and settle bills via applied links \u2014 HAVING SUM(total) > 20000 on raw payment headers returns nothing; bills-vs-payments is exactly the distinction naive generators blur."
+    },
+    {
+      "id": "T15",
+      "category": "topn-fetch-first",
+      "question": "top 5 items by 2026 invoice revenue, and include ties for 5th place",
+      "expected_outcome": "transactionline+item+transaction; type='CustInvc'; 2026 filter; SUM(netamount) per item; tie handling via RANK()/DENSE_RANK() <= 5 in an outer filter, or FETCH FIRST 5 ROWS WITH TIES; ordered by revenue desc.",
+      "validation_predicate": "SQL: tables transactionline+item+transaction; matches /'CustInvc'/; 2026 filter; matches (/WITH\\s+TIES/i OR /\\b(DENSE_)?RANK\\s*\\(/i); does NOT rely on a bare /FETCH\\s+FIRST\\s+5\\s+ROWS\\s+ONLY/i without rank logic; does NOT match /\\bLIMIT\\b/i. RESULT: >=5 rows; every returned revenue >= the 5th-ranked value.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "FETCH FIRST 5 ROWS ONLY silently drops tied items; LIMIT/TOP are not SuiteQL. On a real account invoice income lines carry NEGATIVE netamount, so ORDER BY SUM(netamount) DESC surfaces the worst sellers unless the sign is flipped."
+    },
+    {
+      "id": "T16",
+      "category": "topn-fetch-first",
+      "question": "show me the 3 largest invoices we've ever issued",
+      "expected_outcome": "transaction type='CustInvc'; ORDER BY foreigntotal DESC; FETCH FIRST 3 ROWS ONLY; detail columns tranid/trandate/amount; customer name join desirable.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; ORDER BY the total descending; matches /FETCH\\s+FIRST\\s+3\\s+ROWS?\\s+ONLY/i; does NOT match /\\bLIMIT\\b/i or /\\bTOP\\s+3\\b/i. RESULT: exactly 3 rows sorted descending by amount.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "LIMIT 3 (MySQL/Postgres) and TOP 3 (T-SQL) both throw syntax errors in SuiteQL \u2014 Oracle-style FETCH FIRST is mandatory."
+    },
+    {
+      "id": "T17",
+      "category": "topn-fetch-first",
+      "question": "bottom 10 customers by 2025 invoice revenue \u2014 only customers who actually got invoiced",
+      "expected_outcome": "INNER JOIN customer to transaction; type='CustInvc'; 2025 range; GROUP BY customer; ORDER BY revenue ASC; FETCH FIRST 10 ROWS ONLY. The 'actually got invoiced' clause makes INNER (not LEFT) join correct.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; 2025 filter; GROUP BY customer; ORDER BY the aggregate ascending; matches /FETCH\\s+FIRST\\s+10/i; customer join is INNER (no LEFT JOIN preserving un-invoiced customers). RESULT: 10 rows, all revenue > 0, ascending order.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "A reflexive LEFT JOIN drags never-invoiced customers in as NULL/zero rows, contradicting the request; ties at the 10th slot get cut arbitrarily without a deterministic tiebreaker."
+    },
+    {
+      "id": "T18",
+      "category": "period-vs-trandate",
+      "question": "revenue posted to the Mar 2026 accounting period, even where the transaction date fell in a different month",
+      "expected_outcome": "MUST resolve the period via t.postingperiod -> accountingperiod with periodname='Mar 2026'; revenue filter type='CustInvc' (or GL Income variant); trandate must NOT appear as a range filter doing the period's job; scalar or period-keyed rows.",
+      "validation_predicate": "SQL: table accountingperiod present; /postingperiod/i used in a join or IN-subquery; matches /periodname\\s*=\\s*'Mar 2026'/; revenue filter (/'CustInvc'/ or Income accttype logic); trandate does NOT appear in a WHERE range predicate (SELECT-list display allowed). RESULT: 1 aggregate row (or rows keyed only by the period).",
+      "difficulty": "hard",
+      "real_netsuite_trap": "trandate BETWEEN 1 Mar and 31 Mar is the classic wrong answer \u2014 backdated and late-posted entries diverge from it; and the period name must match NetSuite's exact format ('Mar 2026', not 'March 2026')."
+    },
+    {
+      "id": "T19",
+      "category": "period-vs-trandate",
+      "question": "which accounting periods are still open, and how much invoice revenue is posted into each?",
+      "expected_outcome": "accountingperiod WHERE closed='F'; LEFT JOIN transaction ON postingperiod match with type='CustInvc' inside the ON clause (or pre-filtered subquery); GROUP BY periodname; open periods with zero postings still listed; ordered by startdate.",
+      "validation_predicate": "SQL: matches /closed\\s*=\\s*'F'/; LEFT (OUTER) JOIN to transaction or a correlated subquery keyed on postingperiod; the CustInvc condition NOT placed in a bare outer WHERE on the transaction side; GROUP BY period. RESULT: exactly 4 rows (Apr 2026, May 2026, Jun 2026, Jul 2026); amounts >= 0 with NULL/COALESCE tolerated for empty periods.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "closed is a 'T'/'F' string, not a boolean (closed = false errors out); INNER JOIN or WHERE t.type='CustInvc' after the LEFT JOIN drops the zero-activity future periods the controller asked about."
+    },
+    {
+      "id": "T20",
+      "category": "period-vs-trandate",
+      "question": "for Q1 2026 compare invoice totals by transaction-date month vs by posting period \u2014 I want to spot backdated postings",
+      "expected_outcome": "Two aggregations over CustInvc Jan-Mar 2026: one keyed on TO_CHAR(trandate,'YYYY-MM'), one keyed on accountingperiod.periodname via postingperiod; presented side-by-side (FULL/LEFT join of two subqueries or a labeled UNION), ideally with a difference column.",
+      "validation_predicate": "SQL: contains BOTH a trandate-derived month expression AND a postingperiod->accountingperiod join; matches /'CustInvc'/; Q1 2026 bounds applied to each side. RESULT: per month/period two comparable totals (two numeric columns, or labeled rows) covering Jan-Mar 2026 such that a difference is computable.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Treating trandate month and posting period as interchangeable is precisely the bug being probed; aligning the keys also trips models \u2014 '2026-01' and 'Jan 2026' never join as raw strings without an explicit mapping."
+    },
+    {
+      "id": "T21",
+      "category": "dimension-grouping",
+      "question": "break down 2026 invoice revenue by product line",
+      "expected_outcome": "transactionline JOIN classification ON l.class JOIN transaction (type='CustInvc', 2026); SUM(netamount) GROUP BY classification.name yielding Hardware/Software/Services. Must source class from the line, not the header and not item.class.",
+      "validation_predicate": "SQL: tables transactionline+classification+transaction; classification joined from transactionline.class (NOT transaction.class which doesn't exist, NOT item.class); matches /'CustInvc'/; 2026 filter; GROUP BY classification name. RESULT: <=3 rows named among Hardware/Software/Services.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "No class column exists on the transaction header in this catalog \u2014 t.class throws field-not-found; joining item.class instead of the line's class dimension misattributes lines re-classed at entry."
+    },
+    {
+      "id": "T22",
+      "category": "dimension-grouping",
+      "question": "invoice revenue by location and subsidiary so far this year",
+      "expected_outcome": "transaction header joined to location and subsidiary; type='CustInvc'; trandate 2026-01-01..today; GROUP BY subsidiary.name, location.name; SUM(foreigntotal) (AUD conversion a bonus).",
+      "validation_predicate": "SQL: joins to location AND subsidiary from the transaction header (t.location, t.subsidiary); matches /'CustInvc'/; 2026 YTD filter; GROUP BY both dimension names. RESULT: columns (subsidiary, location, revenue); each location consistent with its owning subsidiary.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "location exists on both header and line \u2014 mixing line-level location with header foreigntotal fans out and double-counts; grouping by raw ids instead of joined names ships an unreadable report."
+    },
+    {
+      "id": "T23",
+      "category": "dimension-grouping",
+      "question": "netamount by department and class for the Professional Services department this year",
+      "expected_outcome": "transactionline JOIN department ON l.department (d.name='Professional Services') JOIN classification ON l.class JOIN transaction (2026; revenue-type filter or stated all-transaction-types assumption); SUM(netamount) GROUP BY department + class.",
+      "validation_predicate": "SQL: tables transactionline+department+classification+transaction; matches /name\\s*=\\s*'Professional Services'/ exactly; 2026 filter; GROUP BY includes classification name; department and class sourced from transactionline columns. RESULT: rows only for Professional Services; <=3 class rows.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Department hangs off the line, not the header, in this catalog; the filter string must match exactly ('Professional Services', not 'Prof Services' or a LIKE guess) \u2014 and in real accounts line department can differ from the header default."
+    },
+    {
+      "id": "T24",
+      "category": "dimension-grouping",
+      "question": "2026 invoice revenue grouped by the sales rep's department",
+      "expected_outcome": "transaction (CustInvc, 2026) LEFT JOIN employee ON t.employee, JOIN department ON e.department; GROUP BY department.name; rep-less invoices preserved via LEFT JOIN + COALESCE('Unassigned') or their exclusion explicitly stated. Two-hop join through employee is mandatory \u2014 not transactionline.department.",
+      "validation_predicate": "SQL: two-hop join transaction->employee->department via employee.department (NOT transactionline.department); matches /'CustInvc'/; 2026 filter; GROUP BY department name; LEFT JOIN or COALESCE present, OR the response states rep-less invoices are excluded. RESULT: (department, revenue) rows; with LEFT JOIN the grand total ties to total 2026 invoice revenue.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "t.employee is NULL on many transactions \u2014 an inner join silently deletes revenue so the report no longer ties to the revenue total; grouping by line department answers a different question entirely."
+    },
+    {
+      "id": "T25",
+      "category": "multi-currency",
+      "question": "2025 invoice revenue by transaction currency with the AUD-converted total for each",
+      "expected_outcome": "transaction JOIN currency ON t.currency; type='CustInvc'; 2025 range; GROUP BY currency.name; two measures: SUM(foreigntotal) local and SUM(foreigntotal*exchangerate) AUD.",
+      "validation_predicate": "SQL: currency table joined; matches /'CustInvc'/; 2025 filter; contains both a raw SUM(foreigntotal) and a SUM including /\\*\\s*(t\\.)?exchangerate/i; GROUP BY currency name. RESULT: <=4 rows (AUD/USD/GBP/EUR) with two numeric columns; the AUD row's two values are equal.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "In a real account transaction.exchangerate converts to the SUBSIDIARY's base currency, not group AUD \u2014 cross-subsidiary 'AUD' sums need consolidated exchange rates, and the naive figure ties to no report."
+    },
+    {
+      "id": "T26",
+      "category": "multi-currency",
+      "question": "list open USD invoices with the amount in USD and what that is in AUD",
+      "expected_outcome": "transaction JOIN currency with name='USD'; type='CustInvc'; status='open'; detail rows with tranid, foreigntotal (USD), and foreigntotal*exchangerate labelled AUD.",
+      "validation_predicate": "SQL: currency filtered by /name\\s*=\\s*'USD'/ via join or subquery (NOT a bare hardcoded numeric currency id with no name lookup); matches /'CustInvc'/ AND /status\\s*=\\s*'open'/i; contains /\\*\\s*(t\\.)?exchangerate/i. RESULT: detail rows where aud_amount = usd_amount * exchangerate for every row.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "Hardcoding the currency internal id (id=2 etc.) breaks across accounts where ids differ; labelling raw foreigntotal as AUD is a silent unit error."
+    },
+    {
+      "id": "T27",
+      "category": "multi-currency",
+      "question": "rank subsidiaries by Q2 2026 invoice revenue in AUD, and show how much of each one's revenue was billed in a currency other than its own base currency",
+      "expected_outcome": "transaction JOIN subsidiary; compare t.currency vs s.currency; measures: SUM(foreigntotal*exchangerate) total AUD, plus SUM(CASE WHEN t.currency <> s.currency THEN foreigntotal*exchangerate ELSE 0 END) foreign-billed portion; type='CustInvc'; trandate 2026-04-01..2026-06-30; GROUP BY subsidiary; ORDER BY AUD total DESC.",
+      "validation_predicate": "SQL: subsidiary joined; a predicate comparing t.currency with s.currency (both column refs inside one <> or = comparison); matches /'CustInvc'/; Q2 2026 bounds; exchangerate multiplication; GROUP BY subsidiary; ORDER BY the AUD aggregate descending. RESULT: <=3 rows; foreign_billed <= total_aud in every row.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Assuming transaction currency equals the subsidiary base is the classic multi-currency error; in real accounts the booking rate converts to the sub's own base, so a group-AUD figure for a US subsidiary needs triangulated/consolidated rates."
+    },
+    {
+      "id": "T28",
+      "category": "inventory-availability",
+      "question": "which items have fewer than 20 units available at any location?",
+      "expected_outcome": "inventorybalance JOIN item and location; filter quantityavailable < 20 (available, NOT onhand); detail rows itemid/displayname/location/quantityavailable.",
+      "validation_predicate": "SQL: table inventorybalance present; the filter targets /quantityavailable\\s*<\\s*20/ (NOT quantityonhand in the filter); joins item AND location; selects an item identifier. RESULT: rows where quantityavailable < 20.",
+      "difficulty": "easy",
+      "real_netsuite_trap": "quantityonhand vs quantityavailable \u2014 onhand ignores open sales-order commitments, so filtering it tells the buyer the wrong thing; real accounts also spread availability across bins/statuses rather than one tidy table."
+    },
+    {
+      "id": "T29",
+      "category": "inventory-availability",
+      "question": "total available stock per inventory item across all locations, including items with no inventory rows",
+      "expected_outcome": "item (filtered itemtype='InvtPart') LEFT JOIN inventorybalance; SUM(quantityavailable) with COALESCE/NVL to 0; GROUP BY item; items lacking any balance rows appear with 0/NULL.",
+      "validation_predicate": "SQL: LEFT JOIN with item as the preserved side (item FROM-first LEFT JOIN inventorybalance, or equivalent); matches /itemtype\\s*=\\s*'InvtPart'/; COALESCE|NVL around the sum (or NULL deliberately surfaced); GROUP BY item. RESULT: one row per InvtPart item, including zero/NULL-stock items.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "INNER JOIN hides exactly the stocked-out items the question is about; omitting the InvtPart filter pads the list with Service/NonInvtPart rows that can never hold stock."
+    },
+    {
+      "id": "T30",
+      "category": "inventory-availability",
+      "question": "for each item, do we have enough stock on hand to cover open sales order demand?",
+      "expected_outcome": "Demand = SUM(l.quantity) from transactionline+transaction where type='SalesOrd' and status in ('pendingFulfillment','open'), per item. Supply = SUM(quantityonhand) per item from inventorybalance (onhand, because quantityavailable already nets commitments). Both pre-aggregated in subqueries/CTEs, then joined on item; output demand, onhand, and a shortfall difference or covered flag.",
+      "validation_predicate": "SQL: matches /'SalesOrd'/ with a status filter; transactionline quantity aggregated per item; inventorybalance aggregated per item in a SEPARATE subquery/CTE before joining (no direct line-row-to-balance-row join); a comparison or difference between the two sums; supply side uses quantityonhand. RESULT: one row per item with demand, supply, and a comparable/boolean column; no item duplicated.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Two independent grains: joining SO lines directly to balance rows multiplies quantities by location count (fan-out); subtracting demand from quantityavailable double-counts commitments already netted out of 'available'."
+    },
+    {
+      "id": "T31",
+      "category": "grain-traps",
+      "question": "what's our average order value for sales orders placed in 2026?",
+      "expected_outcome": "Header grain only: AVG(t.foreigntotal) \u2014 or SUM(foreigntotal)/COUNT(DISTINCT t.id) \u2014 over transaction type='SalesOrd' with trandate in 2026; single row. transactionline must not distort the denominator.",
+      "validation_predicate": "SQL: matches /'SalesOrd'/; 2026 filter; AVG over the header total or SUM with COUNT(DISTINCT); transactionline table ABSENT \u2014 or if joined, the denominator uses COUNT(DISTINCT transaction id). RESULT: 1 row, 1 numeric equal to SUM(foreigntotal)/COUNT(DISTINCT id) of 2026 sales orders.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Joining lines repeats the header total per line and inflates AOV by the average line count \u2014 the canonical grain bug; SalesOrd also never posts, so any GL-based attempt returns nothing."
+    },
+    {
+      "id": "T32",
+      "category": "grain-traps",
+      "question": "on average, how many distinct SKUs are on each invoice?",
+      "expected_outcome": "Per-invoice COUNT(DISTINCT l.item) then AVG across invoices (nested aggregate or CTE), or equivalently COUNT(DISTINCT transaction-item pair)/COUNT(DISTINCT transaction); type='CustInvc'; single-row answer.",
+      "validation_predicate": "SQL: tables transactionline+transaction; matches /'CustInvc'/; /COUNT\\s*\\(\\s*DISTINCT/i applied to item at per-invoice grain via nested query, OR a ratio of two COUNT DISTINCT expressions; does NOT compute plain COUNT(*)/COUNT(DISTINCT transaction) with no DISTINCT on item. RESULT: 1 row, one numeric >= 1.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Counting lines instead of distinct items overstates SKU mix whenever an item appears on multiple lines of one invoice; the nested aggregation defeats single-SELECT generators."
+    },
+    {
+      "id": "T33",
+      "category": "grain-traps",
+      "question": "revenue by item class for 2026 with each class's percentage of total revenue",
+      "expected_outcome": "Line grain throughout: SUM(l.netamount) by classification for CustInvc 2026; percentage via SUM() OVER () window or a scalar subquery over the SAME filtered lines \u2014 numerator and denominator both from line netamount; percentages sum to ~100.",
+      "validation_predicate": "SQL: tables transactionline+classification+transaction; matches /'CustInvc'/; 2026 filter; ratio built from a window total (/OVER\\s*\\(\\s*\\)/) or scalar subquery over identically filtered lines; denominator NOT built from header foreigntotal. RESULT: <=3 class rows with amount and pct; pct values sum to 100 +/- 0.5.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "Mixing a line-level numerator with a header-total denominator misstates shares \u2014 on real accounts headers include shipping/tax/discount amounts the class split excludes, so the percentages never total 100."
+    },
+    {
+      "id": "T34",
+      "category": "grain-traps",
+      "question": "by month in 2026: number of invoices and number of invoice line items",
+      "expected_outcome": "transaction JOIN transactionline; type='CustInvc'; 2026; GROUP BY month; invoices = COUNT(DISTINCT t.id), lines = COUNT(l.id) or COUNT(*); invoice_count <= line_count in every month.",
+      "validation_predicate": "SQL: matches /'CustInvc'/; 2026 filter; GROUP BY a month expression; contains /COUNT\\s*\\(\\s*DISTINCT/i for the invoice metric alongside a separate non-distinct COUNT for lines. RESULT: <=12 rows; invoice_count <= line_count in every row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "After the join, COUNT(*) counts lines for BOTH metrics \u2014 invoice counts silently multiply by lines-per-invoice; the two metrics need different grains inside one query."
+    },
+    {
+      "id": "T35",
+      "category": "edge-negative",
+      "question": "net revenue per customer for 2025 after subtracting credit memos",
+      "expected_outcome": "transaction JOIN customer; type IN ('CustInvc','CustCred'); CASE negating CustCred amounts (or invoice-sum minus credits-sum); 2025 range; GROUP BY customer; over-credited customers may show negative net and must not be filtered out.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ AND /'CustCred'/; an explicit negation bound to CustCred (/CASE[\\s\\S]*CustCred[\\s\\S]*THEN\\s*-/i or subtraction of a credits aggregate); customer join with GROUP BY; 2025 filter. RESULT: (customer, net) rows; negative values permitted in output.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "The demo stores credit-memo totals positive, so type IN (...) with a plain SUM ADDS credits to revenue; on real accounts sign conventions differ per table (header vs line vs GL), which is why consultants test one credit memo end-to-end first."
+    },
+    {
+      "id": "T36",
+      "category": "edge-negative",
+      "question": "invoice revenue by department for 2026 \u2014 show every department even if it booked nothing",
+      "expected_outcome": "department as preserved side, LEFT JOIN transactionline (+transaction) with type='CustInvc' AND 2026 conditions placed inside the ON clause or a pre-filtered subquery; COALESCE(SUM(netamount),0); all 4 departments always present in the output.",
+      "validation_predicate": "SQL: LEFT JOIN with department preserved; transaction-side conditions (type, date) located in the JOIN ON clause or a pre-filtered subquery \u2014 FAIL if a bare WHERE references t.type or t.trandate without an IS NULL escape; COALESCE|NVL present. RESULT: exactly 4 rows (Sales, Professional Services, Support, General & Administrative), zero-revenue departments showing 0.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "WHERE t.type='CustInvc' after a LEFT JOIN silently converts it to INNER, so the zero-revenue departments the question exists for disappear \u2014 the single most common outer-join bug in generated SQL."
+    },
+    {
+      "id": "T37",
+      "category": "edge-negative",
+      "question": "average selling price per unit by item for 2026 invoice lines \u2014 don't divide by zero if quantities net out",
+      "expected_outcome": "SUM(netamount)/NULLIF(SUM(quantity),0) per item over transactionline+item+transaction; type='CustInvc'; 2026; items whose quantities net to zero return NULL (or a CASE-handled marker), never an error.",
+      "validation_predicate": "SQL: division whose denominator is wrapped in NULLIF(...,0) or guarded by CASE WHEN SUM(quantity)=0 (matches /NULLIF\\s*\\(\\s*SUM|CASE\\s+WHEN\\s+SUM\\s*\\(\\s*(l\\.)?quantity/i); matches /'CustInvc'/; 2026 filter; GROUP BY item; no unguarded /\\/\\s*SUM\\s*\\(\\s*(l\\.)?quantity/i. RESULT: per-item rows; zero-net-quantity items yield NULL/flag rather than query failure.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "Return/credit lines can net an item's quantity to exactly 0 \u2014 unguarded division throws ORA-01476 on live data and kills the entire report, not just that row."
+    },
+    {
+      "id": "T38",
+      "category": "ambiguous-assumptions",
+      "question": "what was our revenue last quarter?",
+      "expected_outcome": "An explicit stated assumption (revenue = customer invoices; last quarter = 2026-04-01..2026-06-30 \u2014 calendar Q2, which coincides with AU FY Q4 here), then SUM over CustInvc in that range; netting CustCred acceptable if declared; SalesOrd and CustPymt are unacceptable measures.",
+      "validation_predicate": "SQL: matches /'CustInvc'/ (optionally plus CustCred with negation); date bounds Apr 1 2026 AND Jun 30 2026 (or periodnames Apr/May/Jun 2026); does NOT include /'SalesOrd'|'CustPymt'/ in the revenue measure. RESPONSE: prose or SQL comment states the interpretation (matches /assum|interpret|defin|treating|=\\s*invoices/i). RESULT: 1 aggregate row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "'Last quarter' is fiscal-calendar dependent per account (AU FY starts 1 July); 'revenue' read as cash receipts (CustPymt) or bookings (SalesOrd) gives confidently wrong numbers \u2014 the acceptable answer names its definition."
+    },
+    {
+      "id": "T39",
+      "category": "ambiguous-assumptions",
+      "question": "how much money did we make in June?",
+      "expected_outcome": "Interpretation stated, then either (a) net income for Jun 2026 from GL (Income credit-debit minus COGS/Expense debit-credit \u2014 the stronger reading of 'make'), or (b) invoice revenue for Jun 2026 \u2014 each acceptable only with the assumption declared; 'June' must resolve to the most recent June (2026), and CustPymt cash collected is not an acceptable measure.",
+      "validation_predicate": "SQL: EITHER [tables transactionaccountingline+account with /'Income'/ and /'Expense'|'COGS'/ logic] OR [/'CustInvc'/ header sum]; a Jun 2026 filter (periodname='Jun 2026' or a 2026 date range \u2014 not 2025); does NOT use /'CustPymt'/ as the measure. RESPONSE: explicit assumption statement present (matches /assum|interpret|net income|profit|revenue\\s*=/i). RESULT: 1 aggregate row.",
+      "difficulty": "medium",
+      "real_netsuite_trap": "'Made' as cash collected (CustPymt) is the tempting wrong turn; silently picking June 2025 because it feels 'complete' also fails the user \u2014 the year choice must be stated."
+    },
+    {
+      "id": "T40",
+      "category": "ambiguous-assumptions",
+      "question": "show me sales by region for this financial year",
+      "expected_outcome": "Three ambiguities resolved and stated: sales = CustInvc revenue (SalesOrd bookings only if explicitly labelled as bookings); region = customer.territory (APAC/EMEA/AMER \u2014 the only region-like field; subsidiary.country acceptable with reasoning); financial year = an explicit dated range (AU FY starting 1 July is the natural pick for an AUD-based account \u2014 either FY26 Jul 2025-Jun 2026 or FY27-to-date from Jul 2026 \u2014 calendar year acceptable if declared). GROUP BY territory with summed revenue.",
+      "validation_predicate": "SQL: groups by /territory/ (or subsidiary country with stated rationale); matches /'CustInvc'/ (SalesOrd only if explicitly labelled bookings in the response); a contiguous explicit FY or FY-to-date trandate/period range whose bounds are stated in the response; no source-column reference to a nonexistent region field like /c(ustomer)?\\.region/i (alias 'AS region' permitted). RESULT: <=3 rows keyed APAC/EMEA/AMER with revenue totals.",
+      "difficulty": "hard",
+      "real_netsuite_trap": "No 'region' column exists \u2014 generators hallucinate customer.region; fiscal year start varies per account (AU: 1 July), so an undeclared calendar-year guess silently reports the wrong period."
+    }
+  ]
+}
