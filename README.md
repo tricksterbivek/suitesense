@@ -1,7 +1,10 @@
 # SuiteSense — AI SuiteQL Console for NetSuite
 
-Ask questions about NetSuite data in plain English. SuiteSense generates the
-SuiteQL with Claude, runs it, and renders the answer as a table or chart.
+Ask questions about NetSuite data in plain English. SuiteSense retrieves from a
+library of 100 verified SuiteQL patterns (each proven against a real NetSuite
+account), generates with a multi-provider LLM chain, validates and EXECUTES the
+result against a NetSuite-shaped test database before returning it, and renders
+the answer as a table or chart. Browse the library at /library.
 
 **Live demo:** https://suitesense.vercel.app
 
@@ -9,9 +12,9 @@ SuiteQL with Claude, runs it, and renders the answer as a table or chart.
 "Top 10 customers by revenue"
         │
         ▼
-┌───────────────────┐   Claude (claude-opus-4-8)
-│   /api/generate   │──  schema catalog + few-shot examples
-└───────────────────┘   structured JSON output → SuiteQL
+┌───────────────────┐   provider chain (Cerebras → Groq → Gemini → OpenRouter)
+│   /api/generate   │──  verified library retrieval + trap warnings + validation
+└───────────────────┘   + server-side execution gate → SuiteQL
         │
         ▼
 ┌───────────────────┐   SuiteQL → SQLite dialect bridge
@@ -34,6 +37,8 @@ names every time. SuiteSense turns the question straight into a runnable query.
 The public demo never touches a real NetSuite account. Queries execute against
 a **seeded, deterministic SQLite database running entirely in your browser**
 (sql.js/wasm) whose 15 tables mirror the real NetSuite analytics schema —
+including REAL semantics (mainline/tax rows, ledger-signed amounts, letter
+status codes, unpaid balances, period rollups, logistics documents) —
 transactions and lines (AR **and** AP), the GL layer
 (`transactionaccountingline`, `account`, `accountingperiod`), entities
 (`customer`, `vendor`, `employee`), items and `inventorybalance`, and
