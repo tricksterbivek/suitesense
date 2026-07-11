@@ -27,14 +27,22 @@ export default function LibraryBrowser({ queries, categories }) {
   const [copied, setCopied] = useState(null);
 
   const filtered = useMemo(() => {
-    const words = toks(q);
+    const words = [...new Set(toks(q))];
     return queries
       .filter((e) => cat === 'all' || e.category === cat)
       .map((e) => {
         if (!words.length) return { e, s: 1 };
-        const hay = new Set([...toks(e.intent), ...e.keywords.flatMap(toks), ...toks(e.category), ...toks(e.sql)]);
+        // weighted, exact-keyword-first (mirrors the server-side retriever)
+        const kw = new Set(e.keywords.flatMap(toks));
+        const intent = new Set([...toks(e.intent), ...toks(e.category)]);
+        const body = new Set(toks(e.sql));
         let s = 0;
-        for (const w of words) if ([...hay].some((h) => h.includes(w) || w.includes(h))) s += 1;
+        for (const w of words) {
+          if (kw.has(w)) s += 3;
+          else if (intent.has(w)) s += 2;
+          else if ([...kw].some((k) => k.length > 3 && k.startsWith(w.slice(0, 4)))) s += 2;
+          else if (body.has(w)) s += 1;
+        }
         return { e, s };
       })
       .filter((x) => x.s > 0)
