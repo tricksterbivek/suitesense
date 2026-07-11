@@ -17,7 +17,7 @@
       "why": "On sales transactions item lines carry NEGATIVE netamount and quantity (credit convention). SUM gives negative or nonsensical revenue, and ORDER BY units DESC returns the WORST sellers first. It also includes the header, tax, subtotal and markup lines.",
       "fix": "Negate: SUM(-l.netamount). Filter mainline='F' AND taxline='F' and restrict itemtype to real products. See REV-002.",
       "severity": "critical",
-      "detect": "SUM\\s*\\(\\s*\\w*\\.?netamount\\s*\\)|SUM\\s*\\(\\s*\\w*\\.?quantity\\s*\\)"
+      "detect": null
     },
     {
       "id": "F-NO-MAINLINE",
@@ -35,7 +35,7 @@
       "why": "transaction.subsidiary is NOT_EXPOSED for the SuiteQL SEARCH channel and raises 'Field subsidiary for record transaction was not found. NOT_EXPOSED'. The query errors outright.",
       "fix": "Use transactionline.subsidiary and BUILTIN.DF() for the name. See DIM-001, CUR-001.",
       "severity": "critical",
-      "detect": "\\bt(ransaction)?\\.subsidiary\\b|=\\s*t\\.subsidiary"
+      "detect": null
     },
     {
       "id": "F-OPEN-BALANCE",

@@ -57,10 +57,14 @@ async function callAnthropic(client, system, messages) {
   });
   if (response.stop_reason === 'refusal') return { refusal: true };
   const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
 }
 
-async function callGemini(system, question) {
+async function callGemini(system, messages) {
   const r = await fetch(
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent',
     {
@@ -68,19 +72,29 @@ async function callGemini(system, question) {
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': process.env.GEMINI_API_KEY },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: `${system}\n\nRespond with only a JSON object: {"sql": "...", "explanation": "..."} where explanation is one sentence describing what the query returns.` }] },
-        contents: [{ role: 'user', parts: [{ text: question }] }],
+        contents: messages.map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
         generationConfig: { responseMimeType: 'application/json' },
       }),
     },
   );
   if (!r.ok) throw new Error(`gemini ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const data = await r.json();
-  return JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}');
+  try {
+    return JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text ?? '{}');
+  } catch {
+    return {};
+  }
 }
 
 export async function POST(request) {
   const t0 = Date.now();
-  const { question } = await request.json();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: 'Request body must be valid JSON: { "question": "..." }' }, { status: 400 });
+  }
+  const question = body?.question;
   if (!question || typeof question !== 'string' || question.length > 500) {
     return Response.json({ error: 'Provide a question under 500 characters.' }, { status: 400 });
   }
@@ -91,77 +105,87 @@ export async function POST(request) {
 
   // Curated fallback: the best verified library query. Beats free-form when we
   // have no model, and is a truthful answer to the class of question.
-  const fallback = () => {
+  const fallbackResponse = (reason) => {
     const match = bestMatch(question) || retrieve(question, 1)[0];
     if (!match) return null;
-    return {
+    record({ question, source: 'library', ok: true, ms: Date.now() - t0, note: reason });
+    return Response.json({
       sql: match.sql,
       explanation: `Verified library query — ${match.intent}. Adapt the :placeholders (dates, ids, row count) to your needs.`,
       source: 'library',
       libraryId: match.id,
-    };
+    });
   };
+  const noMatch = () =>
+    Response.json({ error: 'No close verified query and no AI available. Try rephrasing toward revenue, AR, vendor spend, GL, or inventory.' }, { status: 404 });
 
   if (hasAnthropic || hasGemini) {
+    let gen;
     try {
-      let gen;
       if (hasAnthropic) {
-        const client = new Anthropic();
-        gen = await callAnthropic(client, system, [{ role: 'user', content: question }]);
-        if (gen.refusal) return Response.json({ error: 'The model declined this request.' }, { status: 422 });
+        gen = await callAnthropic(new Anthropic(), system, [{ role: 'user', content: question }]);
+        if (gen.refusal) {
+          record({ question, source: 'refusal', ok: false, ms: Date.now() - t0 });
+          return Response.json({ error: 'The model declined this request.' }, { status: 422 });
+        }
       } else {
-        gen = await callGemini(system, question);
+        gen = await callGemini(system, [{ role: 'user', content: question }]);
       }
-
-      // Validate. One repair attempt if a critical trap slipped through.
-      let { sql, explanation } = gen;
-      let verdict = validateSuiteQL(sql);
-      let repaired = false;
-      if (verdict.worst === 'critical' && sql) {
-        try {
-          const fix = hasAnthropic
-            ? await callAnthropic(new Anthropic(), system, [
-                { role: 'user', content: question },
-                { role: 'assistant', content: JSON.stringify({ sql, explanation }) },
-                { role: 'user', content: repairInstruction(verdict.issues) },
-              ])
-            : await callGemini(system + '\n\n' + repairInstruction(verdict.issues), question);
-          if (fix.sql) {
-            const reverdict = validateSuiteQL(fix.sql);
-            if (reverdict.worst !== 'critical') {
-              sql = fix.sql;
-              explanation = fix.explanation || explanation;
-              verdict = reverdict;
-              repaired = true;
-            }
-          }
-        } catch { /* keep original + surface warnings */ }
-      }
-
-      const warnings = verdict.issues.map((i) => ({ severity: i.severity, message: i.message, fix: i.fix }));
-      record({ question, source: 'ai', ok: verdict.ok, issues: verdict.issues, repaired, ms: Date.now() - t0 });
-      return Response.json({ sql, explanation, source: 'ai', repaired, warnings });
     } catch (err) {
       if (err instanceof Anthropic.RateLimitError) {
+        record({ question, source: 'ratelimit', ok: false, ms: Date.now() - t0 });
         return Response.json({ error: 'Rate limited — try again shortly.' }, { status: 429 });
       }
       console.error('generate failed:', err);
-      // fall through to the verified-library fallback rather than error out
-      const fb = fallback();
-      if (fb) {
-        record({ question, source: 'library', ok: true, ms: Date.now() - t0 });
-        return Response.json(fb);
-      }
-      return Response.json({ error: 'Generation failed.' }, { status: 500 });
+      return fallbackResponse('provider-error') || Response.json({ error: 'Generation failed.' }, { status: 500 });
     }
+
+    // Model produced no usable SQL → prefer a verified library answer.
+    let sql = typeof gen?.sql === 'string' ? gen.sql.trim() : '';
+    let explanation = gen?.explanation || '';
+    if (!sql) return fallbackResponse('empty-generation') || noMatch();
+
+    // Validate. One repair attempt if a critical trap slipped through.
+    let verdict = validateSuiteQL(sql);
+    let repaired = false;
+    if (verdict.worst === 'critical') {
+      try {
+        const fix = hasAnthropic
+          ? await callAnthropic(new Anthropic(), system, [
+              { role: 'user', content: question },
+              { role: 'assistant', content: JSON.stringify({ sql, explanation }) },
+              { role: 'user', content: repairInstruction(verdict.issues) },
+            ])
+          : await callGemini(system, [
+              { role: 'user', content: question },
+              { role: 'assistant', content: JSON.stringify({ sql, explanation }) },
+              { role: 'user', content: repairInstruction(verdict.issues) },
+            ]);
+        const fixSql = typeof fix?.sql === 'string' ? fix.sql.trim() : '';
+        if (fixSql) {
+          const reverdict = validateSuiteQL(fixSql);
+          if (reverdict.worst !== 'critical') {
+            sql = fixSql;
+            explanation = fix.explanation || explanation;
+            verdict = reverdict;
+            repaired = true;
+          }
+        }
+      } catch (err) {
+        if (err instanceof Anthropic.RateLimitError) {
+          // repair rate-limited: return a verified library answer rather than shipping the bad SQL
+          return fallbackResponse('repair-ratelimited') || noMatch();
+        }
+        console.error('repair failed:', err);
+      }
+      // If the critical issue still stands, a verified library query is safer than known-bad SQL.
+      if (verdict.worst === 'critical') return fallbackResponse('unrepaired-critical') || noMatch();
+    }
+
+    const warnings = verdict.issues.map((i) => ({ severity: i.severity, message: i.message, fix: i.fix }));
+    record({ question, source: 'ai', ok: verdict.ok, issues: verdict.issues, repaired, ms: Date.now() - t0 });
+    return Response.json({ sql, explanation, source: 'ai', repaired, warnings });
   }
 
-  const fb = fallback();
-  if (fb) {
-    record({ question, source: 'library', ok: true, ms: Date.now() - t0 });
-    return Response.json(fb);
-  }
-  return Response.json({
-    error: 'No close verified query and no AI key configured. Try rephrasing toward revenue, AR, vendor spend, GL, or inventory.',
-  }, { status: 404 });
+  return fallbackResponse('no-key') || noMatch();
 }

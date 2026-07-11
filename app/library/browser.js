@@ -50,14 +50,30 @@ export default function LibraryBrowser({ queries, categories }) {
       .map((x) => x.e);
   }, [q, cat, queries]);
 
+  // Keep the highlighted id and the detail pane in sync: if the selected item
+  // is filtered out, fall through to the top result rather than showing a stale
+  // selection that no longer appears in the list.
   const selected = filtered.find((e) => e.id === selId) || filtered[0];
+  const activeId = selected?.id;
 
   async function copy(text, id) {
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // http/non-secure-context fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
       setCopied(id);
       setTimeout(() => setCopied((c) => (c === id ? null : c)), 1600);
-    } catch { /* clipboard blocked */ }
+    } catch { /* clipboard unavailable */ }
   }
 
   return (
@@ -89,10 +105,10 @@ export default function LibraryBrowser({ queries, categories }) {
           {filtered.map((e) => (
             <li key={e.id}>
               <button
-                className={selected?.id === e.id ? 'lib-item on' : 'lib-item'}
+                className={activeId === e.id ? 'lib-item on' : 'lib-item'}
                 onClick={() => setSelId(e.id)}
                 role="option"
-                aria-selected={selected?.id === e.id}
+                aria-selected={activeId === e.id}
               >
                 <span className="lib-item-intent">{e.intent}</span>
                 <span className="lib-item-meta">

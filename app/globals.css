@@ -860,6 +860,7 @@ tbody tr:hover {
 .warn svg { margin-top: 2px; flex: none; }
 .warn-critical { border-color: rgba(217, 47, 47, 0.35); color: var(--critical-strong); background: rgba(217, 47, 47, 0.05); }
 .warn-major { border-color: rgba(247, 206, 70, 0.5); color: var(--charcoal); }
+.warn-minor { border-color: var(--hairline-soft); color: var(--steel); }
 
 /* ---------- query library ---------- */
 
