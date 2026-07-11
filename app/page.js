@@ -39,6 +39,8 @@ const I = {
   clock: ['M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z', 'M12 6v6l4 2'],
   alert: ['M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4', 'M12 17h.01'],
   zap: ['M13 2L3 14h9l-1 8 10-12h-9l1-8z'],
+  copy: ['M10 8h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2z', 'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2'],
+  check: ['M20 6L9 17l-5-5'],
 };
 
 /* Regex-pass SuiteQL highlighter: strings → comments → keywords → numbers. */
@@ -90,6 +92,19 @@ export default function Console() {
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState([]);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef(null);
+
+  async function copySql() {
+    try {
+      await navigator.clipboard.writeText(sql);
+      setCopied(true);
+      clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 1600);
+    } catch (err) {
+      console.error('copy failed:', err);
+    }
+  }
 
   useEffect(() => {
     try {
@@ -245,6 +260,10 @@ export default function Console() {
                   {source === 'ai' && <span className="source-badge">AI</span>}
                   {source === 'examples' && <span className="source-badge examples">Curated</span>}
                 </div>
+                <button onClick={copySql} aria-label="Copy SuiteQL to clipboard">
+                  <Icon d={copied ? I.check : I.copy} size={13} />
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
                 <button className="buy" onClick={() => run()} aria-label="Run query">
                   <Icon d={I.play} size={13} />
                   Run
