@@ -1,6 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { detectParams, fillParams } from '../../lib/translate.js';
+import ParamForm, { defaultParamValues } from '../components/ParamForm.js';
 
 function Icon({ d, size = 15 }) {
   return (
@@ -31,6 +33,7 @@ export default function LibraryBrowser({ queries, categories }) {
   const [cat, setCat] = useState('all');
   const [selId, setSelId] = useState(queries[0]?.id);
   const [copied, setCopied] = useState(null);
+  const [paramValues, setParamValues] = useState({});
 
   const filtered = useMemo(() => {
     const words = [...new Set(toks(q))];
@@ -61,6 +64,15 @@ export default function LibraryBrowser({ queries, categories }) {
   // selection that no longer appears in the list.
   const selected = filtered.find((e) => e.id === selId) || filtered[0];
   const activeId = selected?.id;
+  const selectedParams = useMemo(() => (selected ? detectParams(selected.sql) : []), [selected]);
+  // reset the fill-in values whenever a different entry is selected
+  useEffect(() => {
+    if (selected) setParamValues(defaultParamValues(selected.sql));
+  }, [activeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const resolvedSql = useMemo(
+    () => (selected && selectedParams.length ? fillParams(selected.sql, paramValues).sql : selected?.sql ?? ''),
+    [selected, selectedParams, paramValues],
+  );
 
   async function copy(text, id) {
     try {
@@ -141,13 +153,20 @@ export default function LibraryBrowser({ queries, categories }) {
             <div className="lib-sqlwrap">
               <div className="lib-sql-toolbar">
                 <span className="lib-id">{selected.id}</span>
-                <button className="lib-copy" onClick={() => copy(selected.sql, selected.id)}>
+                <button className="lib-copy" onClick={() => copy(resolvedSql, selected.id)}>
                   <Icon d={copied === selected.id ? I.check : I.copy} size={13} />
                   {copied === selected.id ? 'Copied' : 'Copy SuiteQL'}
                 </button>
               </div>
-              <pre className="lib-sql"><code>{selected.sql}</code></pre>
+              <pre className="lib-sql"><code>{resolvedSql}</code></pre>
             </div>
+
+            <ParamForm
+              params={selectedParams}
+              values={paramValues}
+              onChange={setParamValues}
+              note="Your values are filled into the query above — Copy gives you the ready-to-run SuiteQL for your account."
+            />
 
             <div className="lib-facts">
               {selected.caveats && (
@@ -173,7 +192,7 @@ export default function LibraryBrowser({ queries, categories }) {
                 </section>
               )}
               <p className="lib-note">
-                Placeholders like <code>:start</code>, <code>:end</code>, <code>:n</code>, <code>:threshold</code> are yours to fill in. This query targets a live NetSuite account (SuiteQL), not the in-browser demo.
+                This query targets a live NetSuite account (SuiteQL). Run it in your SuiteQL console, a saved search alternative, or via SuiteScript/REST.
               </p>
             </div>
           </div>

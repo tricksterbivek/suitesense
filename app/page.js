@@ -1,17 +1,27 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
+import { detectParams, fillParams } from '../lib/translate.js';
+import ParamForm, { defaultParamValues } from './components/ParamForm.js';
 import { QUERIES } from '../lib/library/index.js';
 import { TABLES } from '../lib/schema.js';
 
-// Suggestion chips: representative verified-library questions.
-const SUGGESTED_IDS = ['REV-001', 'AR-002', 'REV-002', 'AP-001', 'GL-002'];
-const SUGGESTIONS = SUGGESTED_IDS
-  .map((id) => QUERIES.find((q) => q.id === id))
-  .filter(Boolean)
-  .map((q) => q.question || q.intent);
+// Suggestion chips: drawn from the whole verified library and shuffled on
+// every visit so the console never greets you with the same five questions.
+const SUGGESTION_POOL = QUERIES
+  .map((q) => q.question || q.intent)
+  .filter((q) => q && q.length <= 64);
+const DEFAULT_SUGGESTIONS = SUGGESTION_POOL.slice(0, 5);
+function shuffled(pool) {
+  const a = [...pool];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 const HISTORY_KEY = 'suitesense-history';
 
 /* Minimal inline icon set (Lucide paths) — no icon dependency. */
@@ -99,13 +109,20 @@ export default function Console() {
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState([]);
   const [copied, setCopied] = useState(false);
+  const [paramValues, setParamValues] = useState({});
+  const sqlParams = useMemo(() => detectParams(sql), [sql]);
+  // Run and Copy always use the filled-in query, never the raw :placeholders.
+  const resolvedSql = useMemo(
+    () => (sqlParams.length ? fillParams(sql, paramValues).sql : sql),
+    [sql, sqlParams, paramValues],
+  );
   const [warnings, setWarnings] = useState([]);
   const [repaired, setRepaired] = useState(false);
   const copyTimer = useRef(null);
 
   async function copySql() {
     try {
-      await navigator.clipboard.writeText(sql);
+      await navigator.clipboard.writeText(resolvedSql);
       setCopied(true);
       clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopied(false), 1600);
@@ -114,7 +131,10 @@ export default function Console() {
     }
   }
 
+  const [suggestions, setSuggestions] = useState(DEFAULT_SUGGESTIONS);
+
   useEffect(() => {
+    setSuggestions(shuffled(SUGGESTION_POOL).slice(0, 5));
     try {
       setHistory(JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'));
     } catch {
@@ -144,12 +164,14 @@ export default function Console() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
       setSql(data.sql);
+      const defaults = defaultParamValues(data.sql);
+      setParamValues(defaults);
       setExplanation(data.explanation);
       setSource(data.source);
       setWarnings(data.warnings || []);
       setRepaired(!!data.repaired);
       remember(q, data.sql);
-      await run(data.sql);
+      await run(fillParams(data.sql, defaults).sql);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -163,7 +185,7 @@ export default function Console() {
   // dialect, we say so instead of showing a scary error.
   const [demoGap, setDemoGap] = useState(null);
 
-  async function run(query = sql) {
+  async function run(query = resolvedSql) {
     setError(null);
     setDemoGap(null);
     try {
@@ -243,7 +265,7 @@ export default function Console() {
               </button>
             </div>
             <div className="chips">
-              {SUGGESTIONS.map((s) => (
+              {suggestions.map((s) => (
                 <button
                   key={s}
                   className="chip"
@@ -291,6 +313,12 @@ export default function Console() {
                 </button>
               </div>
               <SqlEditor value={sql} onChange={setSql} />
+              <ParamForm
+                params={sqlParams}
+                values={paramValues}
+                onChange={(v) => { setParamValues(v); run(fillParams(sql, v).sql); }}
+                note="These values are filled into the query when you Run or Copy it — set your real dates and limits before using it on a live account."
+              />
               {explanation && (
                 <p className="explanation">
                   <Icon d={I.sparkles} size={13} />
