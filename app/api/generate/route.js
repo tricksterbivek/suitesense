@@ -4,6 +4,7 @@ import { knowledgeText } from '../../../lib/library/knowledge.js';
 import { validateSuiteQL, repairInstruction } from '../../../lib/validate.js';
 import { record } from '../../../lib/feedback.js';
 import { enabledProviders, isRateLimit } from '../../../lib/providers.js';
+import { demoExecute } from '../../../lib/demoExec.js';
 
 // Static part of the system prompt: role, verified rules, dialect, format.
 const SYSTEM_BASE = `You translate business questions about NetSuite data into SuiteQL that runs correctly against a REAL NetSuite account.
@@ -105,33 +106,49 @@ export async function POST(request) {
   let sql = gen.sql.trim();
   let explanation = gen.explanation || '';
 
-  // Validate. One repair attempt (same provider) if a critical trap slipped through.
+  // Validate statically, then EXECUTE against the demo dataset (which mirrors
+  // real SuiteQL semantics). Either kind of failure earns one repair attempt
+  // with the same provider; an unrepaired failure falls back to the library.
   let verdict = validateSuiteQL(sql);
+  let demo = await demoExecute(sql);
   let repaired = false;
-  if (verdict.worst === 'critical') {
+  const needsRepair = () => verdict.worst === 'critical' || (demo.tested && !demo.ok);
+  if (needsRepair()) {
+    const problems = [
+      ...(verdict.worst === 'critical' ? [repairInstruction(verdict.issues)] : []),
+      ...(demo.tested && !demo.ok
+        ? [`Executing your SQL against a NetSuite-shaped test database failed with: ${demo.error}. Fix the SQL so it parses and runs.`]
+        : []),
+    ].join('\n');
     try {
       const fix = await used.call(system, [
         { role: 'user', content: question },
         { role: 'assistant', content: JSON.stringify({ sql, explanation }) },
-        { role: 'user', content: repairInstruction(verdict.issues) },
+        { role: 'user', content: problems },
       ]);
       if (usable(fix)) {
-        const reverdict = validateSuiteQL(fix.sql.trim());
-        if (reverdict.worst !== 'critical') {
-          sql = fix.sql.trim();
+        const fixSql = fix.sql.trim();
+        const reverdict = validateSuiteQL(fixSql);
+        const redemo = await demoExecute(fixSql);
+        if (reverdict.worst !== 'critical' && !(redemo.tested && !redemo.ok)) {
+          sql = fixSql;
           explanation = fix.explanation || explanation;
           verdict = reverdict;
+          demo = redemo;
           repaired = true;
         }
       }
     } catch (err) {
       console.error('repair failed:', err?.message || err);
     }
-    // Still critical → a verified library query is safer than known-bad SQL.
-    if (verdict.worst === 'critical') return fallbackResponse('unrepaired-critical') || noMatch();
+    // Still broken → a verified library query is safer than known-bad SQL.
+    if (needsRepair()) return fallbackResponse('unrepaired-failure') || noMatch();
   }
 
   const warnings = verdict.issues.map((i) => ({ severity: i.severity, message: i.message, fix: i.fix }));
-  record({ question, source: 'ai', provider: used.name, ok: verdict.ok, issues: verdict.issues, repaired, ms: Date.now() - t0 });
-  return Response.json({ sql, explanation, source: 'ai', provider: used.name, repaired, warnings });
+  record({ question, source: 'ai', provider: used.name, ok: verdict.ok, issues: verdict.issues, repaired, demoTested: demo.tested, demoRows: demo.rows, ms: Date.now() - t0 });
+  return Response.json({
+    sql, explanation, source: 'ai', provider: used.name, repaired, warnings,
+    demo: demo.tested ? { ok: demo.ok, rows: demo.rows } : null,
+  });
 }

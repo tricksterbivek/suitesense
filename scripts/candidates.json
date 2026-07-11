@@ -1,0 +1,2556 @@
+{
+ "entries": [
+  {
+   "id": "FIN-REV-001",
+   "area": "finance",
+   "category": "revenue",
+   "scenario": "The controller at a wholesale products distributor needs the official monthly revenue figure that ties to the income statement, sourced from posted GL activity rather than transaction headers.",
+   "question": "What is our GL-posted revenue by accounting period (month) for a given date range?",
+   "intent": "Sums posted transactionaccountingline amounts on Income-type accounts per non-adjustment month period, sign-corrected so credits (revenue) are positive.",
+   "keywords": [
+    "gl revenue",
+    "income statement",
+    "monthly revenue",
+    "posted revenue",
+    "accounting period",
+    "income accounts",
+    "revenue trend"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    TO_CHAR(ap.startdate, 'YYYY-MM') AS period_month,\n    SUM(-tal.amount * t.exchangerate) AS revenue_base\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND a.accttype = 'Income'\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, TO_CHAR(ap.startdate, 'YYYY-MM')\nORDER BY TO_CHAR(ap.startdate, 'YYYY-MM')",
+   "sample_shape": [
+    "period_name",
+    "period_month",
+    "revenue_base"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction=t.id)",
+    "transactionaccountingline->account (tal.account=a.id)",
+    "transaction->accountingperiod (t.postingperiod=ap.id)"
+   ],
+   "caveats": "GL truth requires transactionaccountingline with posting='T'; income = credit - debit, and amount is debit-signed, so revenue is SUM(-amount). accountingperiod contains quarter/year rollup rows, so isadjust='F' AND isquarter='F' AND isyear='F' are mandatory when listing months. Period join goes through transaction.postingperiod, not trandate. exchangerate converts to the transaction subsidiary's base; cross-subsidiary totals assume a common base currency \u2014 add BUILTIN.DF(tl.subsidiary) grouping if bases differ. Add 'OthIncome' to the accttype filter if non-operating income should be included.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-REV-002",
+   "area": "finance",
+   "category": "revenue",
+   "scenario": "A merchandising manager at a retail products company wants to see which SKUs actually drive revenue so she can prioritize reorder and promotion decisions.",
+   "question": "Which products generated the most revenue (and how many units) over a date range?",
+   "intent": "Ranks real product items by line-level net revenue and units sold across invoices and cash sales, sign-corrected and excluding pseudo-items.",
+   "keywords": [
+    "top products",
+    "product revenue",
+    "sku revenue",
+    "units sold",
+    "best sellers",
+    "item sales",
+    "line level"
+   ],
+   "sql": "SELECT\n    i.itemid AS item_sku,\n    i.displayname AS item_name,\n    i.itemtype AS item_type,\n    SUM(-tl.quantity) AS units_sold,\n    SUM(-tl.netamount * t.exchangerate) AS revenue_base\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nJOIN item i ON i.id = tl.item\nWHERE t.type IN ('CustInvc', 'CashSale')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND i.itemtype IN ('InvtPart', 'NonInvtPart', 'Assembly', 'Kit', 'Service', 'OthCharge', 'DwnLdItem', 'GiftCert')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY i.itemid, i.displayname, i.itemtype\nORDER BY SUM(-tl.netamount * t.exchangerate) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "item_type",
+    "units_sold",
+    "revenue_base"
+   ],
+   "joins": [
+    "transactionline->transaction (tl.transaction=t.id)",
+    "transactionline->item (tl.item=i.id)"
+   ],
+   "caveats": "Sales line netamount and quantity are NEGATIVE in transactionline, so both are negated. mainline='F' AND taxline='F' prevents double-counting header/tax rows. itemtype is constrained to real sellable items so Subtotal/Markup/Discount pseudo-items don't distort per-item sums (this also means header-level discount lines are excluded from item revenue). exchangerate converts each line to its subsidiary base \u2014 consolidated ranking assumes a common base currency. Credit memos are not netted here (see FIN-REV-009).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-REV-003",
+   "area": "finance",
+   "category": "sales-reporting",
+   "scenario": "An account management lead at a B2B wholesale company needs a top-customers list for quarterly business reviews and to spot revenue concentration risk.",
+   "question": "Who are our top N customers by invoiced revenue in a date range?",
+   "intent": "Ranks customers by total header invoice amount (base-currency converted) with invoice counts, using the customer join for AR entity resolution.",
+   "keywords": [
+    "top customers",
+    "customer revenue",
+    "revenue concentration",
+    "invoiced sales",
+    "customer ranking",
+    "key accounts"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer_id,\n    c.companyname AS customer_name,\n    COUNT(t.id) AS invoice_count,\n    SUM(t.foreigntotal * t.exchangerate) AS invoiced_revenue_base\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY c.entityid, c.companyname\nORDER BY SUM(t.foreigntotal * t.exchangerate) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "customer_id",
+    "customer_name",
+    "invoice_count",
+    "invoiced_revenue_base"
+   ],
+   "joins": [
+    "transaction->customer (t.entity=c.id)"
+   ],
+   "caveats": "entity is polymorphic \u2014 CustInvc is an AR type, so the join target must be customer (a vendor join would silently drop rows). Header foreigntotal on invoices is positive and GROSS (includes tax and shipping); for net product revenue use the line grain (FIN-REV-002). Credit memos are not netted here. exchangerate converts to each transaction's subsidiary base; cross-subsidiary ranking assumes one base currency. No status filter is used \u2014 never filter status='open'; use foreignamountunpaid if only unpaid invoices are wanted.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-REV-004",
+   "area": "finance",
+   "category": "revenue",
+   "scenario": "The FP&A analyst at a multi-subsidiary consumer goods distributor builds a quarterly revenue trend per subsidiary for the board deck.",
+   "question": "What is our net line-level sales revenue by quarter, broken down by subsidiary?",
+   "intent": "Sums sign-corrected invoice and cash-sale line revenue per calendar quarter and subsidiary (subsidiary resolved from transactionline).",
+   "keywords": [
+    "quarterly revenue",
+    "revenue by quarter",
+    "subsidiary revenue",
+    "sales trend",
+    "quarter over quarter",
+    "net sales"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY') || '-Q' || TO_CHAR(t.trandate, 'Q') AS sales_quarter,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary_name,\n    SUM(-tl.netamount * t.exchangerate) AS revenue_base\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nWHERE t.type IN ('CustInvc', 'CashSale')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY') || '-Q' || TO_CHAR(t.trandate, 'Q'), BUILTIN.DF(tl.subsidiary)\nORDER BY TO_CHAR(t.trandate, 'YYYY') || '-Q' || TO_CHAR(t.trandate, 'Q'), BUILTIN.DF(tl.subsidiary)",
+   "sample_shape": [
+    "sales_quarter",
+    "subsidiary_name",
+    "revenue_base"
+   ],
+   "joins": [
+    "transactionline->transaction (tl.transaction=t.id)"
+   ],
+   "caveats": "transaction.subsidiary is NOT queryable (NOT_EXPOSED) \u2014 subsidiary comes from transactionline with BUILTIN.DF. Sales line netamount is negative, hence SUM(-netamount); mainline='F' AND taxline='F' avoids header/tax double counting. Full GROUP BY expressions are repeated (no aliases allowed in GROUP BY). exchangerate converts each line to its own subsidiary base, so each subsidiary row is in that subsidiary's base currency \u2014 do not sum rows across subsidiaries with different base currencies. Calendar quarters from trandate, not fiscal periods; use accountingperiod (FIN-REV-001) for fiscal alignment.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-REV-005",
+   "area": "finance",
+   "category": "sales-reporting",
+   "scenario": "A sales director at a products wholesaler runs monthly commission and performance reviews and needs each rep's invoiced revenue and deal count.",
+   "question": "How much revenue did each sales rep generate from invoices in a date range, ranked highest first?",
+   "intent": "Ranks sales reps (transaction.employee) by sign-corrected invoice line revenue with distinct invoice counts.",
+   "keywords": [
+    "sales rep performance",
+    "rep revenue",
+    "commission",
+    "sales by rep",
+    "leaderboard",
+    "invoice revenue"
+   ],
+   "sql": "SELECT\n    e.entityid AS sales_rep,\n    COUNT(DISTINCT t.id) AS invoice_count,\n    SUM(-tl.netamount * t.exchangerate) AS revenue_base\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nJOIN employee e ON e.id = t.employee\nWHERE t.type = 'CustInvc'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY e.entityid\nORDER BY SUM(-tl.netamount * t.exchangerate) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "sales_rep",
+    "invoice_count",
+    "revenue_base"
+   ],
+   "joins": [
+    "transactionline->transaction (tl.transaction=t.id)",
+    "transaction->employee (t.employee=e.id)"
+   ],
+   "caveats": "transaction.employee holds the sales rep on sales transactions; the INNER JOIN silently drops invoices with no rep assigned \u2014 switch to a LEFT JOIN with NVL if an 'Unassigned' bucket is needed. Line netamount is negative on sales, hence SUM(-netamount) with mainline='F' AND taxline='F'. COUNT(DISTINCT t.id) is required because the line grain repeats the header per line. Credit memos are not netted, so refunded deals still credit the rep here.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-REV-006",
+   "area": "finance",
+   "category": "sales-reporting",
+   "scenario": "An e-commerce operations manager at a retail products company tracks average order value monthly to measure the impact of bundling and free-shipping threshold changes.",
+   "question": "What is our monthly sales order count, total booked value, and average order value?",
+   "intent": "Computes per-month sales order count, summed header value, and AOV from sales order headers.",
+   "keywords": [
+    "average order value",
+    "aov",
+    "order count",
+    "booked sales",
+    "sales orders",
+    "monthly orders"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS order_month,\n    COUNT(t.id) AS order_count,\n    SUM(t.foreigntotal * t.exchangerate) AS total_booked_base,\n    ROUND(SUM(t.foreigntotal * t.exchangerate) / COUNT(t.id), 2) AS avg_order_value_base\nFROM transaction t\nWHERE t.type = 'SalesOrd'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "order_month",
+    "order_count",
+    "total_booked_base",
+    "avg_order_value_base"
+   ],
+   "joins": [],
+   "caveats": "Sales orders are non-posting, so this is BOOKED demand, not recognized revenue (use FIN-REV-001 for GL revenue). Header foreigntotal on sales orders is positive and gross of tax/shipping. Header grain (no transactionline) means no mainline filter is needed, avoiding line double-counting entirely. No status filter \u2014 cancelled/closed orders are included; status is a raw letter code, so display it with BUILTIN.DF(t.status) if you need to segment, never filter status='open'.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-REV-007",
+   "area": "finance",
+   "category": "sales-reporting",
+   "scenario": "A billing team lead at a wholesale distributor monitors invoicing throughput and active-customer breadth to catch month-end billing backlogs early.",
+   "question": "How many invoices did we issue each month, and how many distinct customers were billed?",
+   "intent": "Counts invoices and distinct billed customers per calendar month from transaction headers.",
+   "keywords": [
+    "invoice count",
+    "invoices per month",
+    "billing volume",
+    "customers billed",
+    "billing throughput"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS invoice_month,\n    COUNT(t.id) AS invoice_count,\n    COUNT(DISTINCT t.entity) AS customers_billed\nFROM transaction t\nWHERE t.type = 'CustInvc'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "invoice_month",
+    "invoice_count",
+    "customers_billed"
+   ],
+   "joins": [],
+   "caveats": "Pure header grain \u2014 counting at the transactionline grain would inflate counts per line, so no line join is used. t.entity is counted directly without joining customer (the join is unnecessary for a distinct count and would be to customer, not vendor, since CustInvc is an AR type). Months come from trandate; switch to the accountingperiod join via t.postingperiod if fiscal-period alignment matters.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-REV-008",
+   "area": "finance",
+   "category": "revenue",
+   "scenario": "The VP of Sales at a products company reviews which accounts are growing or shrinking year over year, comparing YTD revenue against the same window last year to plan retention outreach.",
+   "question": "For each customer, what is YTD revenue versus the same period last year, and what is the change?",
+   "intent": "Pivots sign-corrected invoice/cash-sale line revenue into current-YTD and prior-year-same-window CASE buckets per customer with the delta, ranked by current YTD.",
+   "keywords": [
+    "year over year",
+    "yoy growth",
+    "ytd vs prior year",
+    "customer growth",
+    "revenue comparison",
+    "shrinking accounts",
+    "case buckets"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer_id,\n    c.companyname AS customer_name,\n    SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE, 'YEAR')\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) AS ytd_revenue,\n    SUM(CASE WHEN t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'YEAR'), -12)\n             AND t.trandate <= ADD_MONTHS(TRUNC(SYSDATE), -12)\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) AS prior_ytd_revenue,\n    SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE, 'YEAR')\n        THEN -tl.netamount * t.exchangerate ELSE 0 END)\n    - SUM(CASE WHEN t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'YEAR'), -12)\n               AND t.trandate <= ADD_MONTHS(TRUNC(SYSDATE), -12)\n          THEN -tl.netamount * t.exchangerate ELSE 0 END) AS revenue_change\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nJOIN customer c ON c.id = t.entity\nWHERE t.type IN ('CustInvc', 'CashSale')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'YEAR'), -12)\n    AND t.trandate <= TRUNC(SYSDATE)\nGROUP BY c.entityid, c.companyname\nHAVING SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE, 'YEAR')\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) <> 0\n    OR SUM(CASE WHEN t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'YEAR'), -12)\n             AND t.trandate <= ADD_MONTHS(TRUNC(SYSDATE), -12)\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) <> 0\nORDER BY SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE, 'YEAR')\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "customer_id",
+    "customer_name",
+    "ytd_revenue",
+    "prior_ytd_revenue",
+    "revenue_change"
+   ],
+   "joins": [
+    "transactionline->transaction (tl.transaction=t.id)",
+    "transaction->customer (t.entity=c.id)"
+   ],
+   "caveats": "CASE buckets make the comparison apples-to-apples: prior bucket ends at ADD_MONTHS(TRUNC(SYSDATE), -12), the same day-of-year as today, so a full prior year is NOT compared against a partial current year. The WHERE window spans prior-Jan-1 to today, so prior-year rows dated after today's anniversary fall into neither bucket (ELSE 0) by design; the HAVING clause drops customers who are zero in both buckets. Expressions are repeated verbatim in HAVING/ORDER BY (no aliases). Sales lines negated with mainline='F'/taxline='F'; customer join because CustInvc/CashSale are AR types. Credit memos are excluded \u2014 combine with FIN-REV-009 logic for net-of-returns growth.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-REV-009",
+   "area": "finance",
+   "category": "revenue",
+   "scenario": "The revenue accountant at a consumer products wholesaler reports net sales after returns each month and must show gross billings, credit-memo offsets, and the net figure that reconciles to the P&L direction.",
+   "question": "What is our monthly gross revenue, credit memo total, and net revenue after credit memos?",
+   "intent": "Nets invoice and cash-sale line revenue against credit-memo lines per month, exposing gross, credits, and net columns via type-based CASE buckets.",
+   "keywords": [
+    "net revenue",
+    "credit memo",
+    "returns",
+    "net of credits",
+    "gross vs net",
+    "revenue netting",
+    "refunds"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS sales_month,\n    SUM(CASE WHEN t.type IN ('CustInvc', 'CashSale')\n        THEN -tl.netamount * t.exchangerate ELSE 0 END) AS gross_revenue,\n    SUM(CASE WHEN t.type = 'CustCred'\n        THEN tl.netamount * t.exchangerate ELSE 0 END) AS credit_memo_total,\n    SUM(-tl.netamount * t.exchangerate) AS net_revenue\nFROM transactionline tl\nJOIN transaction t ON t.id = tl.transaction\nWHERE t.type IN ('CustInvc', 'CashSale', 'CustCred')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "sales_month",
+    "gross_revenue",
+    "credit_memo_total",
+    "net_revenue"
+   ],
+   "joins": [
+    "transactionline->transaction (tl.transaction=t.id)"
+   ],
+   "caveats": "Sign symmetry does the netting: invoice/cash-sale lines carry NEGATIVE netamount while credit-memo (CustCred) lines carry POSITIVE netamount, so SUM(-netamount) across all three types yields net revenue automatically; the CASE columns merely display gross and credits (credits shown as a positive offset) separately. mainline='F' AND taxline='F' is essential on every bucket. This is transactional net sales by trandate month \u2014 it approximates but does not replace GL revenue (FIN-REV-001), which also captures journal entries and posting-period differences. exchangerate converts to each subsidiary's base; consolidation assumes one base currency.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-AR-001",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "The AR clerk at a wholesale distributor starts each morning by pulling every invoice that still has an open balance so collections work can be prioritized.",
+   "question": "Show me all open customer invoices with their outstanding balances and due dates.",
+   "intent": "Lists every CustInvc header with a non-zero foreignamountunpaid, showing customer, dates, display status, and open amount in transaction currency.",
+   "keywords": [
+    "open invoices",
+    "accounts receivable",
+    "outstanding balance",
+    "unpaid invoices",
+    "ar open",
+    "foreignamountunpaid"
+   ],
+   "sql": "SELECT\n    t.tranid AS invoice_number,\n    c.entityid AS customer,\n    t.trandate AS invoice_date,\n    t.duedate AS due_date,\n    BUILTIN.DF(t.status) AS status,\n    t.foreignamountunpaid AS open_amount,\n    BUILTIN.DF(t.currency) AS currency\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n    AND t.foreignamountunpaid <> 0\nORDER BY t.duedate, c.entityid",
+   "sample_shape": [
+    "invoice_number",
+    "customer",
+    "invoice_date",
+    "due_date",
+    "status",
+    "open_amount",
+    "currency"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Openness is filtered via foreignamountunpaid <> 0, never status='open' (status is a raw per-type letter code); BUILTIN.DF(t.status) is used only for display. foreigntotal is NOT used for the balance because it ignores partial payments. Amounts are in each invoice's transaction currency \u2014 multiply by t.exchangerate for base-currency totals.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AR-002",
+   "area": "finance",
+   "category": "customer-balance",
+   "scenario": "The controller of a consumer-products wholesaler reviews a per-customer AR aging every week to decide which accounts to put on credit hold.",
+   "question": "Give me an AR aging report by customer with current, 1-30, 31-60, 61-90, and over-90-day buckets.",
+   "intent": "Buckets open CustInvc foreignamountunpaid (converted to base via exchangerate) by days past due date per customer using conditional aggregation.",
+   "keywords": [
+    "ar aging",
+    "aging buckets",
+    "past due",
+    "customer aging report",
+    "days overdue",
+    "receivables aging"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    SUM(CASE WHEN NVL(t.duedate, t.trandate) >= TRUNC(SYSDATE)\n        THEN t.foreignamountunpaid * t.exchangerate ELSE 0 END) AS current_amt,\n    SUM(CASE WHEN NVL(t.duedate, t.trandate) < TRUNC(SYSDATE)\n            AND NVL(t.duedate, t.trandate) >= TRUNC(SYSDATE) - 30\n        THEN t.foreignamountunpaid * t.exchangerate ELSE 0 END) AS days_1_30,\n    SUM(CASE WHEN NVL(t.duedate, t.trandate) < TRUNC(SYSDATE) - 30\n            AND NVL(t.duedate, t.trandate) >= TRUNC(SYSDATE) - 60\n        THEN t.foreignamountunpaid * t.exchangerate ELSE 0 END) AS days_31_60,\n    SUM(CASE WHEN NVL(t.duedate, t.trandate) < TRUNC(SYSDATE) - 60\n            AND NVL(t.duedate, t.trandate) >= TRUNC(SYSDATE) - 90\n        THEN t.foreignamountunpaid * t.exchangerate ELSE 0 END) AS days_61_90,\n    SUM(CASE WHEN NVL(t.duedate, t.trandate) < TRUNC(SYSDATE) - 90\n        THEN t.foreignamountunpaid * t.exchangerate ELSE 0 END) AS days_over_90,\n    SUM(t.foreignamountunpaid * t.exchangerate) AS total_open\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n    AND t.foreignamountunpaid <> 0\nGROUP BY c.entityid\nORDER BY SUM(t.foreignamountunpaid * t.exchangerate) DESC",
+   "sample_shape": [
+    "customer",
+    "current_amt",
+    "days_1_30",
+    "days_31_60",
+    "days_61_90",
+    "days_over_90",
+    "total_open"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Open balance comes from foreignamountunpaid (not foreigntotal, not status filtering). duedate can be NULL (no-terms invoices), so NVL(duedate, trandate) prevents rows from vanishing out of every bucket. Amounts are converted with t.exchangerate to each transaction's subsidiary base currency; cross-subsidiary consolidation assumes bases are comparable \u2014 group by BUILTIN.DF(tl.subsidiary) via transactionline if you need per-subsidiary splits. GROUP BY repeats the raw expression, not the alias.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AR-003",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "The CFO of a mid-market distribution company tracks Days Sales Outstanding each month to gauge whether collections are keeping pace with revenue growth.",
+   "question": "What is our current DSO based on open receivables and the last 91 days of invoiced sales?",
+   "intent": "Single-scan conditional aggregation over CustInvc headers computing open AR in base currency, trailing 91-day invoiced sales in base currency, and DSO = open_ar / sales * 91.",
+   "keywords": [
+    "dso",
+    "days sales outstanding",
+    "collections efficiency",
+    "receivables turnover",
+    "cash conversion",
+    "ar metric"
+   ],
+   "sql": "SELECT\n    SUM(t.foreignamountunpaid * t.exchangerate) AS open_ar_base,\n    SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE) - 91\n        THEN t.foreigntotal * t.exchangerate ELSE 0 END) AS invoiced_sales_91d_base,\n    ROUND(\n        SUM(t.foreignamountunpaid * t.exchangerate)\n        / NULLIF(SUM(CASE WHEN t.trandate >= TRUNC(SYSDATE) - 91\n            THEN t.foreigntotal * t.exchangerate ELSE 0 END), 0)\n        * 91, 1) AS dso_days\nFROM transaction t\nWHERE t.type = 'CustInvc'",
+   "sample_shape": [
+    "open_ar_base",
+    "invoiced_sales_91d_base",
+    "dso_days"
+   ],
+   "joins": [],
+   "caveats": "This is the simple-average DSO approximation (open AR / trailing-91-day invoiced sales * 91), not the countback method. Numerator uses foreignamountunpaid across ALL invoices regardless of age; denominator uses foreigntotal only for invoices dated in the window. Credit memos and unapplied payments are deliberately excluded \u2014 including CustCred would require negating its credit-signed foreigntotal. exchangerate converts each invoice to its own subsidiary's base; consolidating across subsidiaries assumes a common base currency. NULLIF guards divide-by-zero when there are no recent sales.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-AR-004",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "The collections specialist at a packaged-goods wholesaler runs a daily dunning list of overdue invoices with customer email addresses to feed the reminder-email process.",
+   "question": "List all overdue invoices with the customer's email address and how many days late each one is.",
+   "intent": "Lists CustInvc headers with non-zero foreignamountunpaid and duedate before today, joined to customer for email, with computed days_overdue.",
+   "keywords": [
+    "overdue invoices",
+    "dunning list",
+    "customer email",
+    "days late",
+    "past due invoices",
+    "collections"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    c.email AS customer_email,\n    t.tranid AS invoice_number,\n    t.trandate AS invoice_date,\n    t.duedate AS due_date,\n    TRUNC(SYSDATE) - t.duedate AS days_overdue,\n    t.foreignamountunpaid AS open_amount,\n    BUILTIN.DF(t.currency) AS currency\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n    AND t.foreignamountunpaid <> 0\n    AND t.duedate < TRUNC(SYSDATE)\nORDER BY TRUNC(SYSDATE) - t.duedate DESC, t.foreignamountunpaid DESC",
+   "sample_shape": [
+    "customer",
+    "customer_email",
+    "invoice_number",
+    "invoice_date",
+    "due_date",
+    "days_overdue",
+    "open_amount",
+    "currency"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Overdue = foreignamountunpaid <> 0 AND duedate < today; status letter codes are never filtered on. Invoices with NULL duedate are excluded by the duedate predicate \u2014 that is intentional for a dunning list but means no-terms invoices never appear. customer.email can be NULL; the email-send layer must handle blanks. open_amount is transaction currency.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AR-005",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "Before the weekly cash-flow meeting, the treasury analyst at a hardware distributor pulls the biggest open invoices to target high-impact collection calls.",
+   "question": "What are our :n largest open invoices right now, ranked in base currency?",
+   "intent": "Ranks open CustInvc headers by foreignamountunpaid converted to base currency via exchangerate, returning the top :n.",
+   "keywords": [
+    "largest open invoices",
+    "top invoices",
+    "biggest receivables",
+    "high value invoices",
+    "collection targets",
+    "ranking"
+   ],
+   "sql": "SELECT\n    t.tranid AS invoice_number,\n    c.entityid AS customer,\n    t.trandate AS invoice_date,\n    t.duedate AS due_date,\n    t.foreignamountunpaid AS open_amount,\n    BUILTIN.DF(t.currency) AS currency,\n    t.foreignamountunpaid * t.exchangerate AS open_amount_base\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustInvc'\n    AND t.foreignamountunpaid <> 0\nORDER BY t.foreignamountunpaid * t.exchangerate DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "invoice_number",
+    "customer",
+    "invoice_date",
+    "due_date",
+    "open_amount",
+    "currency",
+    "open_amount_base"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Ranking is on foreignamountunpaid * exchangerate so multi-currency invoices sort comparably; ranking raw foreignamountunpaid would mis-order across currencies. Uses FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET). exchangerate converts to the transaction's own subsidiary base \u2014 with multiple base currencies, cross-subsidiary ranking is approximate.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AR-006",
+   "area": "finance",
+   "category": "customer-balance",
+   "scenario": "The AR team at a specialty-foods wholesaler produces month-end customer statements showing invoices, credit memos, and payments in chronological order per account.",
+   "question": "Build a statement-style activity list per customer showing invoices, credits, and payments between :start and :end with original and open amounts.",
+   "intent": "Chronological header-level listing of CustInvc, CustCred, and CustPymt per customer in a date range, showing signed original amount, remaining open amount, and display status.",
+   "keywords": [
+    "customer statement",
+    "account activity",
+    "statement of account",
+    "invoices credits payments",
+    "customer ledger",
+    "month end"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    t.trandate AS tran_date,\n    BUILTIN.DF(t.type) AS tran_type,\n    t.tranid AS document_number,\n    t.foreigntotal AS signed_amount,\n    t.foreignamountunpaid AS open_amount,\n    BUILTIN.DF(t.status) AS status,\n    BUILTIN.DF(t.currency) AS currency\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type IN ('CustInvc', 'CustCred', 'CustPymt')\n    AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nORDER BY c.entityid, t.trandate, t.tranid",
+   "sample_shape": [
+    "customer",
+    "tran_date",
+    "tran_type",
+    "document_number",
+    "signed_amount",
+    "open_amount",
+    "status",
+    "currency"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Signs are native: CustInvc foreigntotal is positive; CustCred and CustPymt are credit-signed (negative), so summing signed_amount per customer yields the net AR movement for the period \u2014 do not ABS these rows on a statement. open_amount uses foreignamountunpaid; for payments a negative value means unapplied credit. Filter to a single customer at the application layer (only :start/:end/:n/:threshold/:period/:acctnumber placeholders are supported). Status is display-only via BUILTIN.DF.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AR-007",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "The finance manager of a distribution business reconciles cash receipts weekly and needs total customer payments received per customer for the period.",
+   "question": "How much did we receive in customer payments between :start and :end, by customer?",
+   "intent": "Aggregates CustPymt headers in a date range per customer: payment count, total received in base currency (negated because payments are credit-signed), and first/last payment dates.",
+   "keywords": [
+    "payments received",
+    "cash receipts",
+    "customer payments",
+    "period collections",
+    "cash application",
+    "receipts by customer"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    COUNT(t.id) AS payment_count,\n    SUM(-t.foreigntotal * t.exchangerate) AS amount_received_base,\n    MIN(t.trandate) AS first_payment_date,\n    MAX(t.trandate) AS last_payment_date\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustPymt'\n    AND t.trandate BETWEEN TO_DATE(:start, 'YYYY-MM-DD') AND TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY c.entityid\nORDER BY SUM(-t.foreigntotal * t.exchangerate) DESC",
+   "sample_shape": [
+    "customer",
+    "payment_count",
+    "amount_received_base",
+    "first_payment_date",
+    "last_payment_date"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "CustPymt foreigntotal is credit-signed (negative), so it is negated to report positive cash received \u2014 never SUM the raw value expecting a positive number. exchangerate converts each payment to its subsidiary base; consolidation across subsidiaries assumes a common base currency. This is header-grain cash received, not GL bank postings \u2014 use transactionaccountingline against Bank accounts for GL truth.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AR-008",
+   "area": "finance",
+   "category": "ar",
+   "scenario": "During month-end close, the AR accountant at a consumer-electronics wholesaler hunts for customer payments that were never fully applied to invoices, since unapplied cash distorts customer balances.",
+   "question": "Which customer payments have unapplied amounts still sitting on account?",
+   "intent": "Lists CustPymt headers where foreignamountunpaid is non-zero, showing the original payment amount and the remaining unapplied portion (both negated to display positive).",
+   "keywords": [
+    "unapplied payments",
+    "unapplied cash",
+    "payment on account",
+    "cash application cleanup",
+    "open payments",
+    "credit balance"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    t.tranid AS payment_number,\n    t.trandate AS payment_date,\n    -t.foreigntotal AS payment_amount,\n    -t.foreignamountunpaid AS unapplied_amount,\n    BUILTIN.DF(t.status) AS status,\n    BUILTIN.DF(t.currency) AS currency\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'CustPymt'\n    AND t.foreignamountunpaid <> 0\nORDER BY t.trandate",
+   "sample_shape": [
+    "customer",
+    "payment_number",
+    "payment_date",
+    "payment_amount",
+    "unapplied_amount",
+    "status",
+    "currency"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "For credit-signed CustPymt rows, a non-zero foreignamountunpaid means unapplied credit and is NEGATIVE \u2014 both foreigntotal and foreignamountunpaid are negated for positive display. Filtering foreignamountunpaid <> 0 finds partially and fully unapplied payments without touching the raw status letter codes ('Deposited'/'Not Deposited' style states are display-only via BUILTIN.DF). Amounts are transaction currency.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AR-009",
+   "area": "finance",
+   "category": "customer-balance",
+   "scenario": "The credit manager at a multi-subsidiary distributor ranks the largest net debtor balances straight from the GL to set credit-limit reviews, and needs the numbers to tie to the AR control account.",
+   "question": "Who are our top :n debtors by net AR control-account balance above :threshold, split by subsidiary?",
+   "intent": "GL-grain ranking: sums signed transactionaccountingline.amount on posting rows against AcctRec-type accounts, grouped by customer and line subsidiary, keeping balances >= :threshold and returning the top :n.",
+   "keywords": [
+    "top debtors",
+    "customer balance",
+    "ar control account",
+    "gl receivables",
+    "credit limit review",
+    "net balance ranking"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary,\n    SUM(tal.amount) AS ar_balance_base\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN transactionline tl ON tl.transaction = tal.transaction\n    AND tl.id = tal.transactionline\nJOIN account a ON a.id = tal.account\nJOIN customer c ON c.id = t.entity\nWHERE tal.posting = 'T'\n    AND a.accttype = 'AcctRec'\nGROUP BY c.entityid, BUILTIN.DF(tl.subsidiary)\nHAVING SUM(tal.amount) >= :threshold\nORDER BY SUM(tal.amount) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "customer",
+    "subsidiary",
+    "ar_balance_base"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transactionaccountingline->transactionline (tal.transaction/tal.transactionline = tl.transaction/tl.id)",
+    "transactionaccountingline->account (tal.account = a.id)",
+    "transaction->customer (t.entity = c.id)"
+   ],
+   "caveats": "GL truth: posting='T' with signed tal.amount (AR debits positive, credits negative), so the plain SUM is the net receivable balance per customer \u2014 no per-type sign flipping needed at this grain. Subsidiary comes from transactionline (transaction.subsidiary is not queryable), and grouping by it keeps each base currency separate rather than mixing them. The inner join through t.entity to customer drops journal entries whose header entity is empty even if their lines hit AcctRec \u2014 such journal AR adjustments will not appear against a customer here. GROUP BY/HAVING/ORDER BY repeat full expressions, never aliases.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-AP-001",
+   "area": "finance",
+   "category": "ap",
+   "scenario": "The AP clerk at a wholesale distributor needs a live list of every unpaid or partially paid vendor bill to plan this week's check run and answer vendor calls.",
+   "question": "Show me all open vendor bills with vendor, due date, status, and the amount still owed.",
+   "intent": "Lists every vendor bill with a non-zero unpaid balance, sign-corrected to positive amounts, sorted by due date.",
+   "keywords": [
+    "open bills",
+    "unpaid vendor bills",
+    "accounts payable",
+    "amount due",
+    "vendbill",
+    "outstanding balance"
+   ],
+   "sql": "SELECT\n    t.tranid AS bill_number,\n    v.entityid AS vendor_id,\n    v.companyname AS vendor_name,\n    t.trandate AS bill_date,\n    t.duedate AS due_date,\n    BUILTIN.DF(t.status) AS bill_status,\n    -t.foreigntotal AS bill_total,\n    -t.foreignamountunpaid AS amount_due\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'VendBill'\n    AND NVL(t.foreignamountunpaid, 0) <> 0\nORDER BY t.duedate, v.companyname",
+   "sample_shape": [
+    "bill_number",
+    "vendor_id",
+    "vendor_name",
+    "bill_date",
+    "due_date",
+    "bill_status",
+    "bill_total",
+    "amount_due"
+   ],
+   "joins": [
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "Open filter uses foreignamountunpaid <> 0, never status='open' (status is a raw per-type letter code, displayed only via BUILTIN.DF). Vendor bill amounts are credit-signed (negative) so both foreigntotal and foreignamountunpaid are negated for positive display. Amounts are in transaction currency; no consolidation is attempted.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AP-002",
+   "area": "finance",
+   "category": "ap",
+   "scenario": "The controller of a multi-brand retail products company reviews AP aging every Monday to decide which vendors to pay first and where to negotiate extended terms.",
+   "question": "Give me an AP aging report by vendor with buckets: current, 1-30, 31-60, 61-90, and over 90 days past due.",
+   "intent": "Nets open vendor bills and unapplied vendor credits per vendor into standard aging buckets keyed off duedate versus today.",
+   "keywords": [
+    "ap aging",
+    "aging buckets",
+    "past due",
+    "duedate",
+    "vendor balance",
+    "accounts payable aging"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor_id,\n    v.companyname AS vendor_name,\n    SUM(CASE WHEN TRUNC(SYSDATE) - NVL(t.duedate, t.trandate) <= 0\n        THEN -t.foreignamountunpaid ELSE 0 END) AS current_not_due,\n    SUM(CASE WHEN TRUNC(SYSDATE) - NVL(t.duedate, t.trandate) BETWEEN 1 AND 30\n        THEN -t.foreignamountunpaid ELSE 0 END) AS days_1_30,\n    SUM(CASE WHEN TRUNC(SYSDATE) - NVL(t.duedate, t.trandate) BETWEEN 31 AND 60\n        THEN -t.foreignamountunpaid ELSE 0 END) AS days_31_60,\n    SUM(CASE WHEN TRUNC(SYSDATE) - NVL(t.duedate, t.trandate) BETWEEN 61 AND 90\n        THEN -t.foreignamountunpaid ELSE 0 END) AS days_61_90,\n    SUM(CASE WHEN TRUNC(SYSDATE) - NVL(t.duedate, t.trandate) > 90\n        THEN -t.foreignamountunpaid ELSE 0 END) AS days_over_90,\n    SUM(-t.foreignamountunpaid) AS total_open\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type IN ('VendBill', 'VendCred')\n    AND NVL(t.foreignamountunpaid, 0) <> 0\nGROUP BY v.entityid, v.companyname\nORDER BY SUM(-t.foreignamountunpaid) DESC",
+   "sample_shape": [
+    "vendor_id",
+    "vendor_name",
+    "current_not_due",
+    "days_1_30",
+    "days_31_60",
+    "days_61_90",
+    "days_over_90",
+    "total_open"
+   ],
+   "joins": [
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "Openness is foreignamountunpaid <> 0, not a status string. Bills carry a negative unpaid balance and unapplied vendor credits a positive one, so negating foreignamountunpaid yields positive AP for bills and negative offsets for credits, netting to true vendor exposure. NVL(duedate, trandate) covers bills entered without terms. Amounts are transaction-currency; a mixed-currency vendor mixes currencies in one row.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AP-003",
+   "area": "finance",
+   "category": "vendor",
+   "scenario": "A procurement director at a consumer goods wholesaler wants a GL-verified top-vendor spend ranking for the annual supplier negotiation cycle, netting out any credit memos.",
+   "question": "Rank our top vendors by posted expense and COGS spend between two dates, net of vendor credits.",
+   "intent": "Ranks vendors by net posted GL spend (debit - credit on Expense/COGS/OthExpense accounts) from vendor bills and credits in a date range, top :n.",
+   "keywords": [
+    "vendor spend",
+    "top vendors",
+    "spend ranking",
+    "gl spend",
+    "expense accounts",
+    "supplier negotiation"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor_id,\n    v.companyname AS vendor_name,\n    SUM(tal.amount) AS net_gl_spend,\n    COUNT(DISTINCT t.id) AS transaction_count\nFROM transaction t\nJOIN transactionaccountingline tal ON tal.transaction = t.id\nJOIN account a ON a.id = tal.account\nJOIN vendor v ON v.id = t.entity\nWHERE t.type IN ('VendBill', 'VendCred')\n    AND tal.posting = 'T'\n    AND a.accttype IN ('Expense', 'COGS', 'OthExpense')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.entityid, v.companyname\nORDER BY SUM(tal.amount) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "vendor_id",
+    "vendor_name",
+    "net_gl_spend",
+    "transaction_count"
+   ],
+   "joins": [
+    "transaction->transactionaccountingline (id=transaction)",
+    "transactionaccountingline->account (account=id)",
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "GL truth grain: transactionaccountingline with posting='T'. tal.amount is signed debit-positive, so expense debits on bills come through positive and vendor-credit reversals come through negative \u2014 SUM(tal.amount) is already net spend with no manual sign flip. accttype restricted to expense-side types so inventory receipts to asset accounts are excluded. FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET). Cross-subsidiary amounts are in each transaction's base ledger currency.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AP-004",
+   "area": "finance",
+   "category": "ap",
+   "scenario": "The treasury analyst at a distribution company reconciles weekly payment runs against the bank and needs a per-day, per-currency summary of vendor payments issued.",
+   "question": "Summarize vendor payment runs by day: how many payments went out, how many vendors were paid, and the total per currency?",
+   "intent": "Aggregates VendPymt transactions by payment date and currency with payment count, distinct vendor count, and total paid.",
+   "keywords": [
+    "payment run",
+    "vendor payments",
+    "vendpymt",
+    "disbursements",
+    "check run",
+    "bank reconciliation"
+   ],
+   "sql": "SELECT\n    t.trandate AS payment_date,\n    c.name AS currency_name,\n    COUNT(DISTINCT t.id) AS payment_count,\n    COUNT(DISTINCT t.entity) AS vendors_paid,\n    SUM(ABS(t.foreigntotal)) AS total_paid\nFROM transaction t\nJOIN currency c ON c.id = t.currency\nWHERE t.type = 'VendPymt'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY t.trandate, c.name\nORDER BY t.trandate DESC, c.name",
+   "sample_shape": [
+    "payment_date",
+    "currency_name",
+    "payment_count",
+    "vendors_paid",
+    "total_paid"
+   ],
+   "joins": [
+    "transaction->currency (currency=id)"
+   ],
+   "caveats": "ABS(foreigntotal) makes the query robust to AP sign conventions on payment headers (bills are credit-signed; payments sit on the opposite side). Grouping by currency prevents silently summing mixed transaction currencies in one figure. Voided payments still on file will appear; layer BUILTIN.DF(t.status) in a detail view if void exclusion is required.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AP-005",
+   "area": "finance",
+   "category": "ap",
+   "scenario": "An AP manager at a wholesale products company builds a short-term cash forecast every Friday and needs every bill coming due within a chosen horizon.",
+   "question": "Which vendor bills are due in the next N days, and how much cash do we need for each?",
+   "intent": "Lists open vendor bills with a due date between today and today + :threshold days, with positive amounts due and a days-until-due countdown.",
+   "keywords": [
+    "bills due",
+    "cash forecast",
+    "upcoming payments",
+    "due date",
+    "payment planning",
+    "short-term cash"
+   ],
+   "sql": "SELECT\n    t.duedate AS due_date,\n    TRUNC(t.duedate) - TRUNC(SYSDATE) AS days_until_due,\n    t.tranid AS bill_number,\n    v.companyname AS vendor_name,\n    BUILTIN.DF(t.status) AS bill_status,\n    -t.foreignamountunpaid AS amount_due\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'VendBill'\n    AND NVL(t.foreignamountunpaid, 0) <> 0\n    AND t.duedate >= TRUNC(SYSDATE)\n    AND t.duedate <= TRUNC(SYSDATE) + :threshold\nORDER BY t.duedate, v.companyname",
+   "sample_shape": [
+    "due_date",
+    "days_until_due",
+    "bill_number",
+    "vendor_name",
+    "bill_status",
+    "amount_due"
+   ],
+   "joins": [
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": ":threshold is repurposed as the days-ahead horizon (numeric), the only sanctioned numeric placeholder besides :n. Open filter is foreignamountunpaid <> 0 (never a status string); unpaid amount is negated because bill balances are credit-signed. Bills already past due are deliberately excluded (duedate >= today) \u2014 combine with the aging query for the overdue picture. Date arithmetic on TRUNC'd dates keeps whole-day counts.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-AP-006",
+   "area": "finance",
+   "category": "vendor",
+   "scenario": "A category manager at a retail products company tracks month-over-month billing from each supplier to spot cost creep and seasonal buying patterns before quarterly business reviews.",
+   "question": "Show net spend by vendor by month over a date range, including the offset from any vendor credits.",
+   "intent": "Monthly net billed amount per vendor: vendor bill totals minus vendor credit totals, grouped on TO_CHAR(trandate,'YYYY-MM').",
+   "keywords": [
+    "spend by month",
+    "vendor trend",
+    "monthly spend",
+    "vendor credits",
+    "cost creep",
+    "supplier review"
+   ],
+   "sql": "SELECT\n    v.companyname AS vendor_name,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS spend_month,\n    SUM(CASE WHEN t.type = 'VendBill' THEN ABS(t.foreigntotal)\n        ELSE -ABS(t.foreigntotal) END) AS net_spend,\n    COUNT(DISTINCT t.id) AS document_count\nFROM transaction t\nJOIN vendor v ON v.id = t.entity\nWHERE t.type IN ('VendBill', 'VendCred')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.companyname, TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY v.companyname, TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "vendor_name",
+    "spend_month",
+    "net_spend",
+    "document_count"
+   ],
+   "joins": [
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "CASE + ABS makes the sign handling convention-proof: bills always add positively and credits always subtract, regardless of the credit-signed storage of vendor bill headers. Month bucket TO_CHAR(trandate,'YYYY-MM') is repeated verbatim in GROUP BY and ORDER BY (no aliases in GROUP BY). Amounts are transaction currency; multiply by t.exchangerate if a base-currency view is needed.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-AP-007",
+   "area": "finance",
+   "category": "vendor",
+   "scenario": "The CFO of a wholesale distributor is assessing supplier risk and wants to know how concentrated purchasing is: what share of total billed spend the top vendors represent.",
+   "question": "What percentage of our total vendor bill spend does each of our top N vendors represent for a given period?",
+   "intent": "Ranks vendors by billed spend in a date range and computes each vendor's percentage of total spend via a derived total-spend cross join, top :n.",
+   "keywords": [
+    "vendor concentration",
+    "top-n share",
+    "supplier risk",
+    "spend percentage",
+    "pareto",
+    "single source risk"
+   ],
+   "sql": "SELECT\n    vs.vendor_name,\n    vs.vendor_spend,\n    tot.total_spend,\n    ROUND(100 * vs.vendor_spend / tot.total_spend, 2) AS pct_of_total_spend\nFROM (\n    SELECT\n        v.companyname AS vendor_name,\n        SUM(-t.foreigntotal) AS vendor_spend\n    FROM transaction t\n    JOIN vendor v ON v.id = t.entity\n    WHERE t.type = 'VendBill'\n        AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n        AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\n    GROUP BY v.companyname\n) vs,\n(\n    SELECT SUM(-t2.foreigntotal) AS total_spend\n    FROM transaction t2\n    WHERE t2.type = 'VendBill'\n        AND t2.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n        AND t2.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\n) tot\nORDER BY vs.vendor_spend DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "vendor_name",
+    "vendor_spend",
+    "total_spend",
+    "pct_of_total_spend"
+   ],
+   "joins": [
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "No window functions assumed: the denominator comes from a second derived table cross-joined (comma join) to the per-vendor rollup, with identical :start/:end filters so numerator and denominator cover the same population. Bill headers are credit-signed, hence SUM(-foreigntotal) for positive spend. Vendor credits are excluded from both sides to keep the ratio consistent. Percentages mix transaction currencies if the account is multi-currency \u2014 state base-currency needs before trusting the ratio across subsidiaries.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-AP-008",
+   "area": "finance",
+   "category": "ap",
+   "scenario": "The treasury lead at a multi-entity products company reconciles AP cash outflow to the general ledger each close, needing posted vendor-payment cash by bank account and accounting period.",
+   "question": "How much vendor payment cash left each bank account per accounting period?",
+   "intent": "Posted GL cash outflow from VendPymt transactions: credit side of Bank accounts grouped by accountingperiod (period name) and bank account.",
+   "keywords": [
+    "cash outflow",
+    "bank account",
+    "posting period",
+    "gl reconciliation",
+    "vendor payments",
+    "month-end close"
+   ],
+   "sql": "SELECT\n    p.periodname AS posting_period,\n    a.acctnumber AS account_number,\n    a.fullname AS bank_account,\n    SUM(-tal.amount) AS cash_paid_out,\n    COUNT(DISTINCT t.id) AS payment_count\nFROM transaction t\nJOIN transactionaccountingline tal ON tal.transaction = t.id\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod p ON p.id = t.postingperiod\nWHERE t.type = 'VendPymt'\n    AND tal.posting = 'T'\n    AND a.accttype = 'Bank'\n    AND p.isadjust = 'F'\n    AND p.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND p.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY p.periodname, p.startdate, a.acctnumber, a.fullname\nORDER BY p.startdate, a.acctnumber",
+   "sample_shape": [
+    "posting_period",
+    "account_number",
+    "bank_account",
+    "cash_paid_out",
+    "payment_count"
+   ],
+   "joins": [
+    "transaction->transactionaccountingline (id=transaction)",
+    "transactionaccountingline->account (account=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "GL grain with posting='T' only \u2014 this ties to the ledger, not to header totals. Vendor payments credit the bank account, so tal.amount is negative on those lines and SUM(-amount) yields positive cash out. Period join goes through transaction.postingperiod with isadjust='F' to skip adjustment rollup rows; p.startdate is added to GROUP BY so ORDER BY can sort chronologically without aliases. Amounts are in each transaction's base ledger currency.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-AP-009",
+   "area": "finance",
+   "category": "vendor",
+   "scenario": "The FP&A team of a multi-subsidiary wholesale group allocates supplier spend to operating units and needs a line-level breakdown of vendor bill spend by subsidiary and department in base currency.",
+   "question": "Break down vendor bill spend by subsidiary, vendor, and department in base currency for a date range.",
+   "intent": "Line-grain vendor bill spend converted with transaction.exchangerate, grouped by transactionline subsidiary, vendor, and department.",
+   "keywords": [
+    "spend by department",
+    "subsidiary spend",
+    "line level",
+    "base currency",
+    "vendor allocation",
+    "multi-subsidiary"
+   ],
+   "sql": "SELECT\n    BUILTIN.DF(tl.subsidiary) AS subsidiary_name,\n    v.companyname AS vendor_name,\n    BUILTIN.DF(tl.department) AS department_name,\n    SUM(tl.netamount * t.exchangerate) AS base_currency_spend,\n    COUNT(DISTINCT t.id) AS bill_count\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'VendBill'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY BUILTIN.DF(tl.subsidiary), v.companyname, BUILTIN.DF(tl.department)\nORDER BY BUILTIN.DF(tl.subsidiary), SUM(tl.netamount * t.exchangerate) DESC",
+   "sample_shape": [
+    "subsidiary_name",
+    "vendor_name",
+    "department_name",
+    "base_currency_spend",
+    "bill_count"
+   ],
+   "joins": [
+    "transaction->transactionline (id=transaction)",
+    "transaction->vendor (entity=id)"
+   ],
+   "caveats": "Subsidiary and department live on transactionline, not the header (transaction.subsidiary is NOT queryable) \u2014 both displayed via BUILTIN.DF and repeated verbatim in GROUP BY/ORDER BY. mainline='F' AND taxline='F' prevents double counting header and tax rows. Purchase-side line netamount is debit-positive (unlike sales lines), so no negation is needed. exchangerate converts each line to its own subsidiary's base currency; cross-subsidiary totals therefore mix base currencies unless all subsidiaries share one \u2014 that assumption is why results stay grouped by subsidiary.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-GL-001",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "A staff accountant at a wholesale products distributor needs to see how a single GL account (e.g. Freight Expense) has trended month by month before proposing a reclass during close.",
+   "question": "Show the posted debit, credit, and net activity for account number :acctnumber by accounting period between :start and :end.",
+   "intent": "Per-period posted debit/credit/net GL activity for one account, keyed by posting period (not transaction date).",
+   "keywords": [
+    "account balance by period",
+    "gl activity",
+    "monthly account trend",
+    "posting period",
+    "debits credits",
+    "single account"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    ap.startdate AS period_start,\n    SUM(CASE WHEN tal.amount > 0 THEN tal.amount ELSE 0 END) AS total_debits,\n    SUM(CASE WHEN tal.amount < 0 THEN -tal.amount ELSE 0 END) AS total_credits,\n    SUM(tal.amount) AS net_activity\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n    AND a.acctnumber = :acctnumber\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate\nORDER BY ap.startdate",
+   "sample_shape": [
+    "period_name",
+    "period_start",
+    "total_debits",
+    "total_credits",
+    "net_activity"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)",
+    "transactionaccountingline->account (tal.account = a.id)"
+   ],
+   "caveats": "GL truth comes from transactionaccountingline with posting='T' (never transactionline netamount for ledger balances). tal.amount is signed: positive = debit, negative = credit, so debit/credit columns are split with CASE and credits are negated for display. Period join goes through transaction.postingperiod, and accountingperiod is filtered isadjust='F' AND isquarter='F' AND isyear='F' to exclude rollup rows that would double-count. All expressions are repeated verbatim in GROUP BY (no aliases).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-GL-002",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "The controller of a retail products company wants a quick trial-balance-style sanity check for one accounting period during month-end close, confirming that total posted debits equal total posted credits across account types.",
+   "question": "Give me trial-balance style totals \u2014 total debits, total credits, and net \u2014 grouped by account type for the period :period.",
+   "intent": "Posted debit/credit/net totals per account.accttype for a single named accounting period; grand debits should equal grand credits.",
+   "keywords": [
+    "trial balance",
+    "account type totals",
+    "debits equal credits",
+    "month end close",
+    "period totals",
+    "gl check"
+   ],
+   "sql": "SELECT\n    a.accttype AS account_type,\n    COUNT(tal.transaction) AS posted_line_count,\n    SUM(CASE WHEN tal.amount > 0 THEN tal.amount ELSE 0 END) AS total_debits,\n    SUM(CASE WHEN tal.amount < 0 THEN -tal.amount ELSE 0 END) AS total_credits,\n    SUM(tal.amount) AS net_debit_minus_credit\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n    AND ap.periodname = :period\n    AND ap.isadjust = 'F'\nGROUP BY a.accttype\nORDER BY a.accttype",
+   "sample_shape": [
+    "account_type",
+    "posted_line_count",
+    "total_debits",
+    "total_credits",
+    "net_debit_minus_credit"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)",
+    "transactionaccountingline->account (tal.account = a.id)"
+   ],
+   "caveats": "Uses transactionaccountingline with posting='T' as the GL source of truth. tal.amount sign convention (debit +, credit -) drives the CASE split; net_debit_minus_credit summed across all rows should be zero if the ledger balances. accountingperiod filtered isadjust='F' so adjustment rollups don't inflate totals; :period matches a single month periodname so isquarter/isyear filters are unnecessary but the name must be a base period like 'Jan 2026'. Amounts are ledger (base-currency) postings per each transaction's subsidiary ledger \u2014 across subsidiaries this mixes base currencies.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-GL-003",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "The FP&A analyst at a consumer goods wholesaler builds a monthly P&L trend to spot margin drift: revenue, COGS, operating expense, and net income by month for the trailing year.",
+   "question": "Build a P&L by month between :start and :end: revenue, COGS, operating expenses, and net income per accounting period.",
+   "intent": "Monthly income statement from posted GL lines, with income shown positive via credit-minus-debit and expenses positive via debit-minus-credit.",
+   "keywords": [
+    "p&l by month",
+    "income statement",
+    "monthly revenue",
+    "cogs",
+    "net income trend",
+    "profit and loss"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    ap.startdate AS period_start,\n    SUM(CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -tal.amount ELSE 0 END) AS revenue,\n    SUM(CASE WHEN a.accttype = 'COGS' THEN tal.amount ELSE 0 END) AS cogs,\n    SUM(CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -tal.amount WHEN a.accttype = 'COGS' THEN -tal.amount ELSE 0 END) AS gross_profit,\n    SUM(CASE WHEN a.accttype IN ('Expense', 'OthExpense') THEN tal.amount ELSE 0 END) AS operating_expense,\n    SUM(-tal.amount) AS net_income\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n    AND a.accttype IN ('Income', 'OthIncome', 'COGS', 'Expense', 'OthExpense')\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate\nORDER BY ap.startdate",
+   "sample_shape": [
+    "period_name",
+    "period_start",
+    "revenue",
+    "cogs",
+    "gross_profit",
+    "operating_expense",
+    "net_income"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)",
+    "transactionaccountingline->account (tal.account = a.id)"
+   ],
+   "caveats": "Sign discipline is the whole trick: tal.amount is debit-positive/credit-negative, so income = credit - debit = -amount (negated to show revenue positive) and expense = debit - credit = +amount. Because the WHERE clause restricts to P&L accttypes only, net_income collapses to SUM(-tal.amount) for all rows. Uses posting periods (transaction.postingperiod), not trandate, so late-posted entries land in the correct month; rollup periods excluded via isadjust/isquarter/isyear='F'. Consolidates across subsidiaries in each ledger's base currency \u2014 mixed-currency accounts should add a subsidiary grouping (see FIN-GL-009).",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-GL-004",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "An operations accountant at a distribution company tracks document throughput \u2014 how many invoices, bills, payments, and journals were entered each month \u2014 to plan close staffing and spot entry backlogs.",
+   "question": "How many transactions of each type were created per month between :start and :end?",
+   "intent": "Header-grain count of transactions by month (trandate) and transaction type, with human-readable type names.",
+   "keywords": [
+    "transaction volume",
+    "count by type",
+    "monthly volumes",
+    "document throughput",
+    "invoice count",
+    "transaction summary"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS tran_month,\n    t.type AS type_code,\n    BUILTIN.DF(t.type) AS type_name,\n    COUNT(t.id) AS tran_count\nFROM transaction t\nWHERE t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM'), t.type, BUILTIN.DF(t.type)\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM'), COUNT(t.id) DESC",
+   "sample_shape": [
+    "tran_month",
+    "type_code",
+    "type_name",
+    "tran_count"
+   ],
+   "joins": [],
+   "caveats": "Pure header grain \u2014 counting transaction rows directly avoids the line-fanout that a transactionline join would cause. Raw t.type codes (CustInvc, VendBill, ...) are kept for filtering/programmatic use while BUILTIN.DF(t.type) gives the display name. Bucketing is by trandate (entry activity), not posting period \u2014 non-posting documents like Sales Orders are intentionally included; add a posting filter if only GL-posting docs matter. Expressions are repeated in GROUP BY and ORDER BY (no aliases), per SuiteQL rules.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-GL-005",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "During an audit request, a senior accountant at a products wholesaler must produce the full posted GL detail for one account \u2014 every debit and credit with source document and counterparty \u2014 over a date range.",
+   "question": "List every posted GL entry hitting account :acctnumber between :start and :end, with date, document, entity, period, and debit/credit columns.",
+   "intent": "Line-level posted GL register (detail listing) for a single account over a trandate range, formatted with separate debit and credit columns.",
+   "keywords": [
+    "gl detail",
+    "account register",
+    "audit trail",
+    "account activity",
+    "ledger detail",
+    "drill down"
+   ],
+   "sql": "SELECT\n    t.trandate AS tran_date,\n    BUILTIN.DF(t.type) AS tran_type,\n    t.tranid AS document_number,\n    BUILTIN.DF(t.entity) AS entity_name,\n    ap.periodname AS posting_period,\n    CASE WHEN tal.amount > 0 THEN tal.amount ELSE 0 END AS debit,\n    CASE WHEN tal.amount < 0 THEN -tal.amount ELSE 0 END AS credit,\n    tal.amount AS signed_amount\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND a.acctnumber = :acctnumber\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nORDER BY t.trandate, t.id",
+   "sample_shape": [
+    "tran_date",
+    "tran_type",
+    "document_number",
+    "entity_name",
+    "posting_period",
+    "debit",
+    "credit",
+    "signed_amount"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transactionaccountingline->account (tal.account = a.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)"
+   ],
+   "caveats": "transaction.entity is polymorphic (customer, vendor, employee...), so BUILTIN.DF(t.entity) is used for the display name instead of a type-specific join that would drop rows for other entity types. Debit/credit presentation derives from the signed tal.amount (debit +, credit -); posting='T' excludes non-posting and voided memory lines. Detail is filtered by trandate for an activity window \u2014 switch the filter to ap.periodname if the auditor wants posting-period cutoff instead.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-GL-006",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "A finance manager at a hardgoods retailer investigates why this month's expenses jumped versus a prior month: she needs each account's posted activity in both months side by side with the movement, ranked by biggest swing.",
+   "question": "Compare posted net activity per account between the month containing :start and the month containing :end, and rank accounts by the size of the movement.",
+   "intent": "Per-account net GL activity in two specific monthly periods with the delta, ordered by absolute movement descending, top :n rows.",
+   "keywords": [
+    "balance movement",
+    "period comparison",
+    "month over month",
+    "flux analysis",
+    "variance by account",
+    "activity delta"
+   ],
+   "sql": "SELECT\n    a.acctnumber AS account_number,\n    a.fullname AS account_name,\n    a.accttype AS account_type,\n    SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:start, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END) AS activity_month_1,\n    SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:end, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END) AS activity_month_2,\n    SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:end, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END)\n        - SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:start, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END) AS movement\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND (ap.startdate = TRUNC(TO_DATE(:start, 'YYYY-MM-DD'), 'MM')\n        OR ap.startdate = TRUNC(TO_DATE(:end, 'YYYY-MM-DD'), 'MM'))\nGROUP BY a.acctnumber, a.fullname, a.accttype\nORDER BY ABS(SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:end, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END)\n    - SUM(CASE WHEN ap.startdate = TRUNC(TO_DATE(:start, 'YYYY-MM-DD'), 'MM') THEN tal.amount ELSE 0 END)) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "account_number",
+    "account_name",
+    "account_type",
+    "activity_month_1",
+    "activity_month_2",
+    "movement"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)",
+    "transactionaccountingline->account (tal.account = a.id)"
+   ],
+   "caveats": "Two months are pivoted into columns with conditional SUMs so a single GL pass produces the comparison; the two target periods are identified by matching accountingperiod.startdate to TRUNC(date,'MM'), which assumes standard calendar-month periods starting on the 1st. Rollup periods excluded (isadjust/isquarter/isyear='F') so quarter/year rows never match. Amounts are signed net activity (debit - credit) \u2014 for P&L accounts a positive movement means more expense or less income depending on accttype. Full CASE expressions are repeated in ORDER BY because aliases cannot be referenced there with aggregates in SuiteQL.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-GL-007",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "Before signing off on the close, a controller at a wholesale distributor scans the largest individual GL postings in the period to catch fat-finger entries, mis-keyed journals, or unusual one-time hits.",
+   "question": "What are the :n largest single posted GL line impacts (by absolute amount) in period :period, with account, document, and status?",
+   "intent": "Top-N individual transactionaccountingline rows in one posting period ranked by ABS(amount), with document and account context.",
+   "keywords": [
+    "largest gl entries",
+    "biggest postings",
+    "top transactions",
+    "close review",
+    "outlier detection",
+    "material entries"
+   ],
+   "sql": "SELECT\n    t.trandate AS tran_date,\n    BUILTIN.DF(t.type) AS tran_type,\n    t.tranid AS document_number,\n    a.acctnumber AS account_number,\n    a.fullname AS account_name,\n    a.accttype AS account_type,\n    tal.amount AS signed_amount,\n    ABS(tal.amount) AS impact_magnitude,\n    BUILTIN.DF(t.status) AS status\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN account a ON a.id = tal.account\nWHERE tal.posting = 'T'\n    AND ap.periodname = :period\nORDER BY ABS(tal.amount) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "tran_date",
+    "tran_type",
+    "document_number",
+    "account_number",
+    "account_name",
+    "account_type",
+    "signed_amount",
+    "impact_magnitude",
+    "status"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)",
+    "transactionaccountingline->account (tal.account = a.id)"
+   ],
+   "caveats": "Ranks raw posted GL lines, so a large journal appears once per large leg (debit and credit legs both surface \u2014 useful for review). Status is displayed with BUILTIN.DF(t.status) because raw status codes are per-type letters and must never be compared to words like 'open'. Uses FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET). Signed amount is kept alongside the magnitude so reviewers can tell debits from credits.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-GL-008",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "A department-budget owner review at a retail products company: FP&A needs posted operating expense by department by month to feed the budget-vs-actual pack, including spend never tagged to a department.",
+   "question": "Show posted operating expense by department for each month between :start and :end, including an 'Unassigned' bucket.",
+   "intent": "Monthly posted expense (Expense + OthExpense accounts) grouped by transactionline department, with untagged lines bucketed as Unassigned.",
+   "keywords": [
+    "expense by department",
+    "departmental spend",
+    "budget vs actual",
+    "cost center",
+    "monthly expense",
+    "opex"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    ap.startdate AS period_start,\n    NVL(BUILTIN.DF(tl.department), 'Unassigned') AS department_name,\n    SUM(tal.amount) AS expense_amount\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN transactionline tl ON tl.transaction = tal.transaction AND tl.id = tal.transactionline\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND a.accttype IN ('Expense', 'OthExpense')\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate, NVL(BUILTIN.DF(tl.department), 'Unassigned')\nORDER BY ap.startdate, SUM(tal.amount) DESC",
+   "sample_shape": [
+    "period_name",
+    "period_start",
+    "department_name",
+    "expense_amount"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transactionaccountingline->transactionline (tal.transaction = tl.transaction AND tal.transactionline = tl.id)",
+    "transactionaccountingline->account (tal.account = a.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)"
+   ],
+   "caveats": "Department lives on transactionline, not the transaction header, so the GL line is joined back to its source line on BOTH keys (tal.transaction = tl.transaction AND tal.transactionline = tl.id) \u2014 joining on transaction alone would fan out and multiply amounts. Expense sign: debit - credit = +tal.amount, so no negation needed for Expense/OthExpense accttypes. NVL wraps BUILTIN.DF so untagged spend is visible rather than silently grouped under NULL; the full NVL expression is repeated in GROUP BY. Amounts are ledger base-currency postings; restrict tl.subsidiary if a single-entity view is required.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-GL-009",
+   "area": "finance",
+   "category": "gl",
+   "scenario": "The CFO of a multi-entity wholesale group wants a per-subsidiary P&L snapshot for a date range to see which entities are profitable before consolidation adjustments.",
+   "question": "Break down revenue, COGS, operating expense, and net income by subsidiary for posting periods between :start and :end.",
+   "intent": "P&L rollup (revenue/COGS/opex/net income) grouped by transactionline subsidiary over a posting-period date range, in each subsidiary's base currency.",
+   "keywords": [
+    "p&l by subsidiary",
+    "entity profitability",
+    "multi subsidiary",
+    "net income by entity",
+    "consolidation",
+    "segment reporting"
+   ],
+   "sql": "SELECT\n    BUILTIN.DF(tl.subsidiary) AS subsidiary_name,\n    SUM(CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -tal.amount ELSE 0 END) AS revenue,\n    SUM(CASE WHEN a.accttype = 'COGS' THEN tal.amount ELSE 0 END) AS cogs,\n    SUM(CASE WHEN a.accttype IN ('Expense', 'OthExpense') THEN tal.amount ELSE 0 END) AS operating_expense,\n    SUM(-tal.amount) AS net_income\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN transactionline tl ON tl.transaction = tal.transaction AND tl.id = tal.transactionline\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND a.accttype IN ('Income', 'OthIncome', 'COGS', 'Expense', 'OthExpense')\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY BUILTIN.DF(tl.subsidiary)\nORDER BY SUM(-tal.amount) DESC",
+   "sample_shape": [
+    "subsidiary_name",
+    "revenue",
+    "cogs",
+    "operating_expense",
+    "net_income"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (tal.transaction = t.id)",
+    "transactionaccountingline->transactionline (tal.transaction = tl.transaction AND tal.transactionline = tl.id)",
+    "transactionaccountingline->account (tal.account = a.id)",
+    "transaction->accountingperiod (t.postingperiod = ap.id)"
+   ],
+   "caveats": "transaction.subsidiary is NOT queryable in SuiteQL (NOT_EXPOSED); subsidiary must come from transactionline via BUILTIN.DF(tl.subsidiary), with the GL-to-line join on both keys to avoid fanout. Each subsidiary's figures are in that subsidiary's own base currency \u2014 rows are directly comparable only if all subsidiaries share a base currency; do NOT sum rows across subsidiaries for a consolidated total without translation. Sign convention: income shown positive as -amount (credit - debit), expenses positive as +amount; net_income = SUM(-tal.amount) since the WHERE restricts to P&L accttypes. Rollup periods excluded via isadjust/isquarter/isyear='F'.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-TAXPER-001",
+   "area": "finance",
+   "category": "tax",
+   "scenario": "The controller at a wholesale distribution company prepares the monthly sales tax remittance and needs the tax charged on customer billing documents totaled by accounting period.",
+   "question": "How much sales tax did we charge customers each month, based on the tax lines of our invoices and credit memos?",
+   "intent": "Sums transactionline tax lines (taxline='T') on posted CustInvc/CustCred by posting period, sign-corrected to positive tax collected.",
+   "keywords": [
+    "sales tax",
+    "tax collected",
+    "tax lines",
+    "by period",
+    "invoice tax",
+    "monthly remittance"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    SUM(-tl.netamount) AS tax_collected,\n    COUNT(DISTINCT t.id) AS taxed_transactions\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE t.posting = 'T'\n    AND t.type IN ('CustInvc', 'CustCred')\n    AND tl.taxline = 'T'\n    AND ap.isadjust = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate\nORDER BY ap.startdate",
+   "sample_shape": [
+    "period_name",
+    "tax_collected",
+    "taxed_transactions"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "Deliberately selects ONLY tax lines with tl.taxline='T' (the inverse of the usual taxline='F' filter used when summing item lines). Sales-side netamount is credit-signed negative, so SUM(-tl.netamount) yields positive tax collected; credit memo tax lines carry the opposite sign and correctly reduce the net. Period joined via transaction.postingperiod with isadjust='F' to skip adjustment periods. Amounts are in transaction currency (no exchangerate applied) \u2014 see FIN-TAXPER-007 for base-currency version.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "FIN-TAXPER-002",
+   "area": "finance",
+   "category": "tax",
+   "scenario": "A finance manager at a retail products company drafts the quarterly VAT/GST return and wants a per-period proxy of output tax charged on sales versus input tax paid on vendor bills to estimate the net remittance.",
+   "question": "Compare the tax we collected on sales against the tax we paid on purchases per period, and show the net tax position.",
+   "intent": "Per posting period: CASE-split sum of taxline='T' lines into tax collected (CustInvc/CustCred, negated) vs tax paid (VendBill/VendCred, natural sign) plus the net difference.",
+   "keywords": [
+    "vat return",
+    "gst",
+    "output tax",
+    "input tax",
+    "net tax position",
+    "tax collected vs paid"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    SUM(CASE WHEN t.type IN ('CustInvc', 'CustCred') THEN -tl.netamount ELSE 0 END) AS tax_collected_sales,\n    SUM(CASE WHEN t.type IN ('VendBill', 'VendCred') THEN tl.netamount ELSE 0 END) AS tax_paid_purchases,\n    SUM(CASE WHEN t.type IN ('CustInvc', 'CustCred') THEN -tl.netamount ELSE 0 END)\n        - SUM(CASE WHEN t.type IN ('VendBill', 'VendCred') THEN tl.netamount ELSE 0 END) AS net_tax_position\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE t.posting = 'T'\n    AND t.type IN ('CustInvc', 'CustCred', 'VendBill', 'VendCred')\n    AND tl.taxline = 'T'\n    AND ap.isadjust = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate\nORDER BY ap.startdate",
+   "sample_shape": [
+    "period_name",
+    "tax_collected_sales",
+    "tax_paid_purchases",
+    "net_tax_position"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "Signs differ by side: sales tax lines are credit-signed negative so they are negated; purchase-side tax lines on VendBill are debit-signed positive and taken as-is, with VendCred tax lines carrying the opposite sign and netting naturally. This is a PROXY for a tax return \u2014 it ignores tax on journals, expense reports, and cash transactions, and mixes transaction currencies. Adjustment periods excluded via isadjust='F'.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-TAXPER-003",
+   "area": "finance",
+   "category": "period",
+   "scenario": "The accounting manager at a consumer goods wholesaler runs a month-end close checklist and needs to see which accounting periods are still open versus closed, alongside how much GL activity has posted into each.",
+   "question": "Show each month period in the range with its open/closed status and the total posted debits, credits, and transaction count.",
+   "intent": "Lists base month periods (rollups excluded) with a derived Open/Closed label and LEFT-JOINed posted GL debit/credit totals from transactionaccountingline.",
+   "keywords": [
+    "period close",
+    "open periods",
+    "closed periods",
+    "posted totals",
+    "month end",
+    "close checklist"
+   ],
+   "sql": "SELECT\n    ap.periodname AS period_name,\n    ap.startdate AS period_start,\n    CASE WHEN ap.closed = 'T' THEN 'Closed' ELSE 'Open' END AS period_status,\n    COUNT(DISTINCT t.id) AS posted_transactions,\n    NVL(SUM(CASE WHEN tal.amount > 0 THEN tal.amount ELSE 0 END), 0) AS total_debits,\n    NVL(SUM(CASE WHEN tal.amount < 0 THEN -tal.amount ELSE 0 END), 0) AS total_credits\nFROM accountingperiod ap\nLEFT JOIN transaction t ON t.postingperiod = ap.id AND t.posting = 'T'\nLEFT JOIN transactionaccountingline tal ON tal.transaction = t.id AND tal.posting = 'T'\nWHERE ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY ap.periodname, ap.startdate, CASE WHEN ap.closed = 'T' THEN 'Closed' ELSE 'Open' END\nORDER BY ap.startdate",
+   "sample_shape": [
+    "period_name",
+    "period_start",
+    "period_status",
+    "posted_transactions",
+    "total_debits",
+    "total_credits"
+   ],
+   "joins": [
+    "accountingperiod->transaction (id=postingperiod, LEFT)",
+    "transaction->transactionaccountingline (id=transaction, LEFT)"
+   ],
+   "caveats": "Month periods isolated with isadjust='F' AND isquarter='F' AND isyear='F' so quarter/year rollup rows never appear. LEFT JOINs keep periods with zero postings visible (NVL guards the sums). Debits/credits split from the single signed tal.amount (debit +, credit -). The posting filters live in the JOIN ON clauses, not WHERE, so they do not silently turn the LEFT JOINs into inner joins. The CASE expression is repeated verbatim in GROUP BY (no alias references allowed).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-TAXPER-004",
+   "area": "finance",
+   "category": "period",
+   "scenario": "The CFO of a multi-channel products company reviews monthly revenue momentum and wants each period's GL revenue next to the prior period's, with the absolute and percentage change.",
+   "question": "What is our posted revenue by month, and how does each month compare to the previous month in dollars and percent?",
+   "intent": "Self-joins a per-period GL income aggregate to itself on ADD_MONTHS(startdate,-1) to produce period-over-period revenue deltas and percent change.",
+   "keywords": [
+    "period over period",
+    "revenue delta",
+    "month over month",
+    "revenue trend",
+    "gl income",
+    "percent change"
+   ],
+   "sql": "SELECT\n    cur.periodname AS period_name,\n    cur.revenue AS revenue,\n    NVL(prev.revenue, 0) AS prior_period_revenue,\n    cur.revenue - NVL(prev.revenue, 0) AS revenue_delta,\n    CASE WHEN NVL(prev.revenue, 0) = 0 THEN NULL\n        ELSE ROUND((cur.revenue - prev.revenue) / ABS(prev.revenue) * 100, 2) END AS pct_change\nFROM (\n    SELECT ap.periodname AS periodname, ap.startdate AS startdate, SUM(-tal.amount) AS revenue\n    FROM transactionaccountingline tal\n    JOIN transaction t ON t.id = tal.transaction\n    JOIN account a ON a.id = tal.account\n    JOIN accountingperiod ap ON ap.id = t.postingperiod\n    WHERE tal.posting = 'T'\n        AND a.accttype = 'Income'\n        AND ap.isadjust = 'F'\n    GROUP BY ap.periodname, ap.startdate\n) cur\nLEFT JOIN (\n    SELECT ap.periodname AS periodname, ap.startdate AS startdate, SUM(-tal.amount) AS revenue\n    FROM transactionaccountingline tal\n    JOIN transaction t ON t.id = tal.transaction\n    JOIN account a ON a.id = tal.account\n    JOIN accountingperiod ap ON ap.id = t.postingperiod\n    WHERE tal.posting = 'T'\n        AND a.accttype = 'Income'\n        AND ap.isadjust = 'F'\n    GROUP BY ap.periodname, ap.startdate\n) prev ON prev.startdate = ADD_MONTHS(cur.startdate, -1)\nWHERE cur.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND cur.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nORDER BY cur.startdate",
+   "sample_shape": [
+    "period_name",
+    "revenue",
+    "prior_period_revenue",
+    "revenue_delta",
+    "pct_change"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (transaction=id)",
+    "transactionaccountingline->account (account=id)",
+    "transaction->accountingperiod (postingperiod=id)",
+    "cur->prev (prev.startdate = ADD_MONTHS(cur.startdate,-1))"
+   ],
+   "caveats": "GL truth: revenue = credit - debit, i.e. SUM(-tal.amount) on posting='T' Income accounts \u2014 not header foreigntotal. Prior period matched via ADD_MONTHS on period startdate instead of window functions (no LAG dependence). LEFT JOIN keeps the first in-range month with a zero prior; pct_change is NULL when the prior is zero to avoid divide-by-zero. tal.amount is in each transaction's subsidiary base currency \u2014 cross-subsidiary totals assume a common base; group by BUILTIN.DF(tl.subsidiary) if that assumption fails. Adjustment periods excluded (isadjust='F').",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-TAXPER-005",
+   "area": "finance",
+   "category": "period",
+   "scenario": "An internal auditor at a distribution company reviews close discipline and wants to catch backdated or forward-posted documents where the transaction date falls in a different month than the accounting period it posted to.",
+   "question": "Which posted transactions have a transaction date in a different month than their posting period?",
+   "intent": "Lists posted transactions where TO_CHAR(trandate,'YYYY-MM') differs from the posting period's start month, with type, subsidiary, and document total.",
+   "keywords": [
+    "backdated postings",
+    "posting period mismatch",
+    "trandate vs period",
+    "audit",
+    "close discipline",
+    "period integrity"
+   ],
+   "sql": "SELECT\n    t.tranid AS document_number,\n    BUILTIN.DF(t.type) AS transaction_type,\n    t.trandate AS transaction_date,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS trandate_month,\n    ap.periodname AS posting_period,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary,\n    t.foreigntotal AS document_total\nFROM transaction t\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nJOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'\nWHERE t.posting = 'T'\n    AND ap.isadjust = 'F'\n    AND TO_CHAR(t.trandate, 'YYYY-MM') <> TO_CHAR(ap.startdate, 'YYYY-MM')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nORDER BY t.trandate DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "document_number",
+    "transaction_type",
+    "transaction_date",
+    "trandate_month",
+    "posting_period",
+    "subsidiary",
+    "document_total"
+   ],
+   "joins": [
+    "transaction->accountingperiod (postingperiod=id)",
+    "transaction->transactionline (id=transaction, mainline='T')"
+   ],
+   "caveats": "Subsidiary comes from transactionline (mainline='T' gives exactly one header row per transaction) because transaction.subsidiary is not exposed to SuiteQL. Month comparison uses the period's startdate month, which assumes standard month-length base periods; adjustment periods are excluded via isadjust='F' so legitimate 'Adjust' postings are not flagged. document_total is raw foreigntotal \u2014 credit-signed (negative) for vendor bills. FETCH FIRST :n ROWS ONLY caps the list (never LIMIT/OFFSET).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-TAXPER-006",
+   "area": "finance",
+   "category": "period",
+   "scenario": "The FP&A lead at a wholesale products company builds a quarterly P&L summary but has been burned by NetSuite's quarter rollup period rows double-counting; they want quarters computed strictly from the underlying month periods.",
+   "question": "Give me revenue, COGS, operating expense, and gross profit rolled up by fiscal quarter, computed from the month periods only.",
+   "intent": "Aggregates posted GL amounts from base month periods into quarter buckets derived from period startdate (YYYY-Q), never touching isquarter rollup rows.",
+   "keywords": [
+    "quarter rollup",
+    "quarterly p&l",
+    "gross profit",
+    "month periods",
+    "no double counting",
+    "gl summary"
+   ],
+   "sql": "SELECT\n    TO_CHAR(ap.startdate, 'YYYY') || '-Q' || TO_CHAR(ap.startdate, 'Q') AS fiscal_quarter,\n    SUM(CASE WHEN a.accttype = 'Income' THEN -tal.amount ELSE 0 END) AS revenue,\n    SUM(CASE WHEN a.accttype = 'COGS' THEN tal.amount ELSE 0 END) AS cogs,\n    SUM(CASE WHEN a.accttype IN ('Expense', 'OthExpense') THEN tal.amount ELSE 0 END) AS operating_expense,\n    SUM(CASE WHEN a.accttype = 'Income' THEN -tal.amount ELSE 0 END)\n        - SUM(CASE WHEN a.accttype = 'COGS' THEN tal.amount ELSE 0 END) AS gross_profit\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND ap.isadjust = 'F'\n    AND ap.isquarter = 'F'\n    AND ap.isyear = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(ap.startdate, 'YYYY') || '-Q' || TO_CHAR(ap.startdate, 'Q')\nORDER BY MIN(ap.startdate)",
+   "sample_shape": [
+    "fiscal_quarter",
+    "revenue",
+    "cogs",
+    "operating_expense",
+    "gross_profit"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (transaction=id)",
+    "transactionaccountingline->account (account=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "Quarter bucket is COMPUTED from month-period startdate (TO_CHAR 'Q'); isquarter='F' AND isyear='F' AND isadjust='F' guarantee only base month periods feed the sums, so rollup rows can never double-count. Signed GL convention: income = credit - debit = SUM(-amount); COGS/expense = debit - credit = SUM(amount). The 'Q' format yields CALENDAR quarters \u2014 companies on a shifted fiscal calendar (e.g. Feb start) should map startdate to their fiscal quarter instead. The full concatenation expression is repeated in GROUP BY; ORDER BY uses aggregate MIN(startdate) for chronological order.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "FIN-TAXPER-007",
+   "area": "finance",
+   "category": "tax",
+   "scenario": "The group tax accountant of a multi-subsidiary products distributor files separate tax returns per legal entity and needs sales tax collected split by subsidiary and period, converted to each subsidiary's base currency.",
+   "question": "How much sales tax did each subsidiary collect per period, in its base currency?",
+   "intent": "Sums taxline='T' lines on posted CustInvc/CustCred grouped by transactionline subsidiary and posting period, converting with transaction.exchangerate to subsidiary base currency.",
+   "keywords": [
+    "tax by subsidiary",
+    "multi-subsidiary",
+    "base currency",
+    "sales tax collected",
+    "entity tax filing",
+    "exchange rate"
+   ],
+   "sql": "SELECT\n    BUILTIN.DF(tl.subsidiary) AS subsidiary,\n    ap.periodname AS period_name,\n    SUM(-tl.netamount * t.exchangerate) AS tax_collected_base_currency,\n    COUNT(DISTINCT t.id) AS taxed_transactions\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE t.posting = 'T'\n    AND t.type IN ('CustInvc', 'CustCred')\n    AND tl.taxline = 'T'\n    AND ap.isadjust = 'F'\n    AND ap.startdate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND ap.startdate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY BUILTIN.DF(tl.subsidiary), ap.periodname, ap.startdate\nORDER BY BUILTIN.DF(tl.subsidiary), ap.startdate",
+   "sample_shape": [
+    "subsidiary",
+    "period_name",
+    "tax_collected_base_currency",
+    "taxed_transactions"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "transaction.subsidiary is not queryable, so subsidiary is read from transactionline via BUILTIN.DF. netamount * exchangerate converts each tax line to the TRANSACTION'S OWN subsidiary base \u2014 figures are per-entity base currency and must NOT be summed across subsidiaries with different base currencies (grouping by subsidiary keeps them separate, which is what per-entity filing needs). Sales tax lines are credit-signed, hence the negation. BUILTIN.DF expression repeated in GROUP BY (no aliases).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "FIN-TAXPER-008",
+   "area": "finance",
+   "category": "period",
+   "scenario": "A staff accountant at a retail wholesaler performs the final review of a single period before locking it and wants posted debit/credit totals broken down by account type as a quick trial-balance-style sanity check.",
+   "question": "For a given period, what are the posted debits, credits, and net movement by account type?",
+   "intent": "For one named period (:period), sums posted transactionaccountingline amounts split into debits/credits/net grouped by account.accttype.",
+   "keywords": [
+    "trial balance",
+    "account type",
+    "period review",
+    "debits credits",
+    "net movement",
+    "pre-close check"
+   ],
+   "sql": "SELECT\n    a.accttype AS account_type,\n    SUM(CASE WHEN tal.amount > 0 THEN tal.amount ELSE 0 END) AS total_debits,\n    SUM(CASE WHEN tal.amount < 0 THEN -tal.amount ELSE 0 END) AS total_credits,\n    SUM(tal.amount) AS net_movement\nFROM transactionaccountingline tal\nJOIN transaction t ON t.id = tal.transaction\nJOIN account a ON a.id = tal.account\nJOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE tal.posting = 'T'\n    AND ap.periodname = :period\n    AND ap.isadjust = 'F'\nGROUP BY a.accttype\nORDER BY a.accttype",
+   "sample_shape": [
+    "account_type",
+    "total_debits",
+    "total_credits",
+    "net_movement"
+   ],
+   "joins": [
+    "transactionaccountingline->transaction (transaction=id)",
+    "transactionaccountingline->account (account=id)",
+    "transaction->accountingperiod (postingperiod=id)"
+   ],
+   "caveats": "Uses the GL source of truth (transactionaccountingline, posting='T') rather than header amounts. tal.amount is a single signed column: positives are debits, negatives credits, so the CASE split reconstructs both sides and SUM(net_movement) across all rows should be ~0 for a balanced period. Period selected by name (:period, e.g. 'Jan 2026') with isadjust='F' so a same-named adjustment period is not mixed in. Amounts are subsidiary base currency; totals blend base currencies in multi-currency OneWorld accounts.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-INV-001",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "A wholesale distributor's inventory planner reviews the daily stock grid to see how much of each SKU physically sits in each warehouse versus how much is actually promisable to new orders.",
+   "question": "Show me on-hand vs available quantity for every inventory item by location.",
+   "intent": "Item-by-location grid of summed on-hand, available, and the committed/held gap from inventorybalance.",
+   "keywords": [
+    "on hand",
+    "available",
+    "by location",
+    "inventory balance",
+    "stock grid",
+    "committed gap"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    loc.name AS location_name,\n    SUM(NVL(ib.quantityonhand, 0)) AS qty_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS qty_available,\n    SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)) AS qty_committed_or_held\nFROM inventorybalance ib\nJOIN item it ON it.id = ib.item\nJOIN location loc ON loc.id = ib.location\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY it.itemid, it.displayname, loc.name\nORDER BY it.itemid, loc.name\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "location_name",
+    "qty_on_hand",
+    "qty_available",
+    "qty_committed_or_held"
+   ],
+   "joins": [
+    "inventorybalance->item (item=id)",
+    "inventorybalance->location (location=id)"
+   ],
+   "caveats": "inventorybalance has one row per bin/lot/status slice, so quantities MUST be SUMmed to the item-location grain or the grid shows fragment rows. itemtype is constrained to real stocked products ('InvtPart','Assembly') so kits/non-inventory pseudo-items never appear. No transaction tables involved, so none of the sign/mainline rules apply here.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-INV-002",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "A retail products company's buyer runs a morning replenishment alert listing every SKU whose company-wide available quantity has dropped below the reorder trigger so purchase orders can be cut before stockouts.",
+   "question": "Which items have total available quantity below our reorder threshold across all locations?",
+   "intent": "Items whose summed available quantity across all locations is below :threshold, with on-hand context and stocked-location count.",
+   "keywords": [
+    "reorder point",
+    "below threshold",
+    "replenishment",
+    "low stock",
+    "available quantity",
+    "buy list"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    SUM(NVL(ib.quantityonhand, 0)) AS total_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS total_available,\n    COUNT(DISTINCT ib.location) AS stocked_locations\nFROM inventorybalance ib\nJOIN item it ON it.id = ib.item\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY it.itemid, it.displayname\nHAVING SUM(NVL(ib.quantityavailable, 0)) < :threshold\nORDER BY SUM(NVL(ib.quantityavailable, 0)) ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "total_on_hand",
+    "total_available",
+    "stocked_locations"
+   ],
+   "joins": [
+    "inventorybalance->item (item=id)"
+   ],
+   "caveats": "Uses a :threshold parameter instead of item.reorderpoint because per-location reorder points are not reliably exposed via SuiteQL in all accounts. Threshold test lives in HAVING on the summed expression (aggregate filter), and the expression is repeated rather than aliased. NVL guards null quantity slices. Items with no inventorybalance rows at all (never stocked) will not appear \u2014 this is a low-stock list, not a full catalog gap list.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-INV-003",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "A fulfillment operations manager needs the list of item-location combinations that can no longer promise stock \u2014 including cells where units are physically on the shelf but fully committed to open orders, and oversold cells gone negative.",
+   "question": "Which item-location combinations have zero or negative available quantity right now?",
+   "intent": "Item-location cells where summed available <= 0, showing on-hand so fully-committed cells are distinguishable from true empties.",
+   "keywords": [
+    "zero available",
+    "negative available",
+    "oversold",
+    "stockout",
+    "fully committed",
+    "item location"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    loc.name AS location_name,\n    SUM(NVL(ib.quantityonhand, 0)) AS qty_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS qty_available\nFROM inventorybalance ib\nJOIN item it ON it.id = ib.item\nJOIN location loc ON loc.id = ib.location\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY it.itemid, it.displayname, loc.name\nHAVING SUM(NVL(ib.quantityavailable, 0)) <= 0\nORDER BY SUM(NVL(ib.quantityonhand, 0)) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "location_name",
+    "qty_on_hand",
+    "qty_available"
+   ],
+   "joins": [
+    "inventorybalance->item (item=id)",
+    "inventorybalance->location (location=id)"
+   ],
+   "caveats": "The <=0 test must run in HAVING on the SUM, not in WHERE on raw rows \u2014 a single negative bin slice does not mean the location cell is out. Result mixes two states the reader must distinguish via qty_on_hand: on_hand > 0 means stock exists but is fully committed/held; on_hand = 0 (or negative available) means a true empty or oversold cell. Sorted by on-hand DESC so committed-but-stocked cells surface first for expediting.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-INV-004",
+   "area": "supply-chain",
+   "category": "warehouse",
+   "scenario": "A director of warehouse operations compares the network's sites each week: how many SKUs each warehouse carries, its total unit position, how much is committed, and what share of the company's total units it holds.",
+   "question": "Give me the total inventory position by location: item count, units on hand, available, committed, and each location's share of company-wide units.",
+   "intent": "Per-location rollup of distinct items, on-hand, available, committed units, and percent of company-wide on-hand units via a scalar subquery.",
+   "keywords": [
+    "inventory position",
+    "by warehouse",
+    "location rollup",
+    "share of units",
+    "committed units",
+    "network summary"
+   ],
+   "sql": "SELECT\n    loc.name AS location_name,\n    COUNT(DISTINCT ib.item) AS distinct_items,\n    SUM(NVL(ib.quantityonhand, 0)) AS units_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS units_available,\n    SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)) AS units_committed,\n    ROUND(100 * SUM(NVL(ib.quantityonhand, 0)) /\n        (SELECT SUM(NVL(b2.quantityonhand, 0)) FROM inventorybalance b2), 2) AS pct_of_company_units\nFROM inventorybalance ib\nJOIN location loc ON loc.id = ib.location\nGROUP BY loc.name\nORDER BY SUM(NVL(ib.quantityonhand, 0)) DESC",
+   "sample_shape": [
+    "location_name",
+    "distinct_items",
+    "units_on_hand",
+    "units_available",
+    "units_committed",
+    "pct_of_company_units"
+   ],
+   "joins": [
+    "inventorybalance->location (location=id)"
+   ],
+   "caveats": "Share-of-company denominator is a scalar subquery over all of inventorybalance \u2014 it counts raw UNITS across every item, so this is a unit-mix comparison, not a value comparison (a location full of small parts can look dominant). Assumes at least one non-zero on-hand row company-wide (otherwise the divisor is null/zero). Committed is derived as on_hand - available, which also absorbs bin holds, not only sales commitments.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-INV-005",
+   "area": "supply-chain",
+   "category": "warehouse",
+   "scenario": "A supply chain risk analyst flags single-point-of-failure SKUs: items where one warehouse holds an outsized share of the company's stock, so a site disruption would halt fulfillment for those products.",
+   "question": "Which items have a dangerously high concentration of their stock in a single location?",
+   "intent": "Item-location cells where one location holds >= :threshold percent of that item's total on-hand units, computed by joining a per-location aggregate to a per-item aggregate.",
+   "keywords": [
+    "stock concentration",
+    "single point of failure",
+    "location risk",
+    "percent at location",
+    "rebalancing",
+    "concentration ratio"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    loc.name AS location_name,\n    locagg.loc_units AS units_at_location,\n    itemagg.total_units AS total_units,\n    ROUND(100 * locagg.loc_units / itemagg.total_units, 1) AS pct_at_location\nFROM (\n    SELECT ib.item AS item, ib.location AS location,\n        SUM(NVL(ib.quantityonhand, 0)) AS loc_units\n    FROM inventorybalance ib\n    GROUP BY ib.item, ib.location\n) locagg\nJOIN (\n    SELECT ib2.item AS item, SUM(NVL(ib2.quantityonhand, 0)) AS total_units\n    FROM inventorybalance ib2\n    GROUP BY ib2.item\n    HAVING SUM(NVL(ib2.quantityonhand, 0)) > 0\n) itemagg ON itemagg.item = locagg.item\nJOIN item it ON it.id = locagg.item\nJOIN location loc ON loc.id = locagg.location\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\n    AND 100 * locagg.loc_units / itemagg.total_units >= :threshold\nORDER BY 100 * locagg.loc_units / itemagg.total_units DESC, itemagg.total_units DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "location_name",
+    "units_at_location",
+    "total_units",
+    "pct_at_location"
+   ],
+   "joins": [
+    "inventorybalance(locagg)->inventorybalance(itemagg) (item)",
+    "inventorybalance->item (item=id)",
+    "inventorybalance->location (location=id)"
+   ],
+   "caveats": "Avoids window functions (not reliably supported in SuiteQL) by joining two derived aggregates on item. The per-item denominator subquery filters HAVING total > 0 to prevent divide-by-zero and to exclude items with only negative/zero balances. The percentage expression is repeated verbatim in WHERE and ORDER BY because aliases cannot be referenced there. :threshold is a percent (e.g. 80).",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-INV-006",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "An order management lead investigates why warehouse shelves look full while the website shows items unsellable \u2014 ranking SKUs by how many on-hand units are already committed to open orders or held.",
+   "question": "Which items have the most units committed (on hand but not available), and what share of their stock is locked up?",
+   "intent": "Top items by derived committed quantity (on_hand - available) with percent-committed, filtered to items with positive on-hand and positive commitment.",
+   "keywords": [
+    "committed quantity",
+    "onhand minus available",
+    "locked stock",
+    "allocation",
+    "backlog",
+    "percent committed"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    SUM(NVL(ib.quantityonhand, 0)) AS qty_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS qty_available,\n    SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)) AS qty_committed,\n    ROUND(100 * (SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)))\n        / SUM(NVL(ib.quantityonhand, 0)), 1) AS pct_committed\nFROM inventorybalance ib\nJOIN item it ON it.id = ib.item\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY it.itemid, it.displayname\nHAVING SUM(NVL(ib.quantityonhand, 0)) > 0\n    AND SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)) > 0\nORDER BY SUM(NVL(ib.quantityonhand, 0)) - SUM(NVL(ib.quantityavailable, 0)) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "qty_on_hand",
+    "qty_available",
+    "qty_committed",
+    "pct_committed"
+   ],
+   "joins": [
+    "inventorybalance->item (item=id)"
+   ],
+   "caveats": "Committed is DERIVED as on_hand - available because a dedicated committed column is not consistently exposed on inventorybalance; the difference also includes bin/status holds, so treat it as 'unavailable', not strictly 'sales-committed'. HAVING requires on_hand > 0 to make pct_committed's divisor safe, and committed > 0 to drop fully-free items. All aggregate expressions are repeated in HAVING/ORDER BY (no alias references).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-INV-007",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "A merchandising manager preparing a cycle-count and slotting review wants the highest-volume SKUs by physical units across the whole network to prioritize count frequency and prime pick locations.",
+   "question": "What are our top items by total units on hand across all locations?",
+   "intent": "Ranking of inventory items by company-wide summed on-hand units, with available units and stocked-location count for context.",
+   "keywords": [
+    "top items",
+    "units on hand",
+    "ranking",
+    "cycle count",
+    "highest stock",
+    "network total"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    SUM(NVL(ib.quantityonhand, 0)) AS total_units_on_hand,\n    SUM(NVL(ib.quantityavailable, 0)) AS total_units_available,\n    COUNT(DISTINCT ib.location) AS stocked_locations\nFROM inventorybalance ib\nJOIN item it ON it.id = ib.item\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY it.itemid, it.displayname\nORDER BY SUM(NVL(ib.quantityonhand, 0)) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "total_units_on_hand",
+    "total_units_available",
+    "stocked_locations"
+   ],
+   "joins": [
+    "inventorybalance->item (item=id)"
+   ],
+   "caveats": "Ranking uses FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET in SuiteQL). Units are summed across bin/lot/status slices before ranking. This is a unit ranking, not a value ranking \u2014 item cost is deliberately not joined, so high-count/low-value parts will dominate; that is the correct view for count-frequency planning.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-INV-008",
+   "area": "supply-chain",
+   "category": "warehouse",
+   "scenario": "A warehouse network coordinator hunts for transfer opportunities: SKUs that are out of stock (or oversold) at one site while other sites still hold available units, so stock can be rebalanced instead of purchased.",
+   "question": "Which items are out of stock at one location but still available at other locations?",
+   "intent": "Item-location cells with available <= 0 joined to the item's company-wide available total, returning how many units exist elsewhere for potential transfer.",
+   "keywords": [
+    "out of stock",
+    "available elsewhere",
+    "transfer opportunity",
+    "rebalancing",
+    "stockout location",
+    "inter-warehouse"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    loc.name AS stockout_location,\n    here.avail_here AS available_at_location,\n    tot.total_avail - here.avail_here AS available_elsewhere\nFROM (\n    SELECT ib.item AS item, ib.location AS location,\n        SUM(NVL(ib.quantityavailable, 0)) AS avail_here\n    FROM inventorybalance ib\n    GROUP BY ib.item, ib.location\n    HAVING SUM(NVL(ib.quantityavailable, 0)) <= 0\n) here\nJOIN (\n    SELECT ib2.item AS item, SUM(NVL(ib2.quantityavailable, 0)) AS total_avail\n    FROM inventorybalance ib2\n    GROUP BY ib2.item\n) tot ON tot.item = here.item\nJOIN item it ON it.id = here.item\nJOIN location loc ON loc.id = here.location\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\n    AND tot.total_avail - here.avail_here > 0\nORDER BY tot.total_avail - here.avail_here DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "stockout_location",
+    "available_at_location",
+    "available_elsewhere"
+   ],
+   "joins": [
+    "inventorybalance(here)->inventorybalance(tot) (item)",
+    "inventorybalance->item (item=id)",
+    "inventorybalance->location (location=id)"
+   ],
+   "caveats": "available_elsewhere is computed as company total minus the stockout cell (total_avail - avail_here) so a negative/oversold cell correctly INCREASES what the rest of the network must cover. Both sides aggregate to the correct grain before joining \u2014 joining raw bin-level rows would double count. Only locations where the item has ever had a balance row appear as stockout candidates; locations that never stocked the SKU are absent by design.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-INV-009",
+   "area": "supply-chain",
+   "category": "inventory",
+   "scenario": "A demand planner at a consumer goods wholesaler blends current availability with trailing 90-day sales velocity to find SKUs whose stock covers fewer days of demand than the replenishment lead time.",
+   "question": "Which selling items have fewer than a target number of days of available stock based on the last 90 days of sales?",
+   "intent": "Items sold in the trailing 90 days (invoices + cash sales at line level) joined to current total available, filtered to days-of-cover below :threshold days.",
+   "keywords": [
+    "days of cover",
+    "sales velocity",
+    "run rate",
+    "stock coverage",
+    "reorder",
+    "90 day demand"
+   ],
+   "sql": "SELECT\n    it.itemid AS item_sku,\n    it.displayname AS item_name,\n    NVL(inv.available_units, 0) AS qty_available,\n    sales.units_sold_90d AS units_sold_90d,\n    ROUND(sales.units_sold_90d / 90, 2) AS avg_daily_units,\n    ROUND(NVL(inv.available_units, 0) * 90 / sales.units_sold_90d, 1) AS days_of_cover\nFROM (\n    SELECT tl.item AS item, SUM(-tl.quantity) AS units_sold_90d\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type IN ('CustInvc', 'CashSale')\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND t.trandate >= TRUNC(SYSDATE) - 90\n    GROUP BY tl.item\n    HAVING SUM(-tl.quantity) > 0\n) sales\nJOIN item it ON it.id = sales.item\nLEFT JOIN (\n    SELECT ib.item AS item, SUM(NVL(ib.quantityavailable, 0)) AS available_units\n    FROM inventorybalance ib\n    GROUP BY ib.item\n) inv ON inv.item = sales.item\nWHERE it.itemtype IN ('InvtPart', 'Assembly')\n    AND NVL(inv.available_units, 0) * 90 < :threshold * sales.units_sold_90d\nORDER BY NVL(inv.available_units, 0) * 90 / sales.units_sold_90d ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "qty_available",
+    "units_sold_90d",
+    "avg_daily_units",
+    "days_of_cover"
+   ],
+   "joins": [
+    "transactionline->transaction (transaction=id)",
+    "transactionline(sales agg)->item (item=id)",
+    "item->inventorybalance(item agg) (id=item)"
+   ],
+   "caveats": "Sales line quantities are NEGATIVE in NetSuite, so velocity is SUM(-tl.quantity), and the line aggregate filters mainline='F' AND taxline='F' plus real product itemtypes to exclude Subtotal/Discount/Markup pseudo-lines. Uses CustInvc/CashSale (actual sales), not SalesOrd, so booked-but-unshipped demand is excluded. Days-of-cover filter is written multiplicatively (available*90 < :threshold*units) to avoid division before the HAVING guard; the divisor in SELECT/ORDER BY is safe because HAVING enforces units_sold_90d > 0. LEFT JOIN + NVL keeps items that sold but now have zero balance rows. :threshold is days (e.g. 30).",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-MOVE-001",
+   "area": "supply-chain",
+   "category": "item-movement",
+   "scenario": "A wholesale distributor's demand planner needs a monthly units-shipped history per SKU to feed reorder-point calculations and spot seasonality.",
+   "question": "How many units of each item did we ship per month between two dates?",
+   "intent": "Monthly shipped units per item from item fulfillment (ItemShip) lines over a date range.",
+   "keywords": [
+    "units shipped",
+    "item fulfillment",
+    "itemship",
+    "monthly shipments",
+    "shipment history",
+    "sku velocity"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS ship_month,\n    SUM(-tl.quantity) AS units_shipped\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item itm ON itm.id = tl.item\nWHERE t.type = 'ItemShip'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY itm.itemid, TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY itm.itemid, TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "item_name",
+    "ship_month",
+    "units_shipped"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = itm.id)"
+   ],
+   "caveats": "Item fulfillment line quantities are NEGATIVE (inventory going out), so shipped units are SUM(-tl.quantity). mainline='F' AND taxline='F' prevents header/tax double counting. itemtype is constrained to InvtPart/Assembly so Subtotal/Discount/Markup pseudo-items and shipping lines never pollute the sum. GROUP BY repeats the full TO_CHAR expression (no aliases in GROUP BY).",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-MOVE-002",
+   "area": "supply-chain",
+   "category": "item-movement",
+   "scenario": "A purchasing manager at a retail products company wants to see which vendors actually delivered the most units of each item, to verify supplier performance against POs.",
+   "question": "Which items did we receive the most units of, and from which vendors?",
+   "intent": "Total received units and receipt count per item and vendor from item receipt (ItemRcpt) lines over a date range, ranked by units received.",
+   "keywords": [
+    "item receipt",
+    "itemrcpt",
+    "units received",
+    "vendor receipts",
+    "inbound quantity",
+    "supplier deliveries"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    v.entityid AS vendor_name,\n    SUM(tl.quantity) AS units_received,\n    COUNT(DISTINCT t.id) AS receipt_count\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item itm ON itm.id = tl.item\nJOIN vendor v ON v.id = t.entity\nWHERE t.type = 'ItemRcpt'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY itm.itemid, v.entityid\nORDER BY SUM(tl.quantity) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_name",
+    "vendor_name",
+    "units_received",
+    "receipt_count"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = itm.id)",
+    "transaction->vendor (t.entity = v.id)"
+   ],
+   "caveats": "Item receipt line quantities are POSITIVE (inventory coming in), so no negation is needed \u2014 unlike ItemShip. entity is polymorphic: joining vendor is correct for PO-sourced receipts, but the INNER JOIN intentionally drops receipts created from transfer orders (no vendor entity); use SC-MOVE-003 for total inbound including transfers. mainline/taxline filters and the itemtype constraint prevent pseudo-line contamination. FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET).",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-MOVE-003",
+   "area": "supply-chain",
+   "category": "item-movement",
+   "scenario": "An inventory controller wants a single view of physical inflow vs outflow per SKU for the quarter to explain why on-hand levels rose or fell.",
+   "question": "For each item, how many units did we receive vs ship in a period, and what was the net movement?",
+   "intent": "Per-item received units, shipped units, and net movement (receipts minus shipments) combining ItemRcpt and ItemShip lines in one pass.",
+   "keywords": [
+    "net movement",
+    "receipts minus shipments",
+    "inflow outflow",
+    "inventory movement",
+    "units received",
+    "units shipped"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    SUM(CASE WHEN t.type = 'ItemRcpt' THEN tl.quantity ELSE 0 END) AS units_received,\n    SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) AS units_shipped,\n    SUM(CASE WHEN t.type = 'ItemRcpt' THEN tl.quantity ELSE 0 END)\n        - SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) AS net_movement\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item itm ON itm.id = tl.item\nWHERE t.type IN ('ItemRcpt', 'ItemShip')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY itm.itemid\nORDER BY SUM(CASE WHEN t.type = 'ItemRcpt' THEN tl.quantity ELSE 0 END)\n    - SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) DESC",
+   "sample_shape": [
+    "item_name",
+    "units_received",
+    "units_shipped",
+    "net_movement"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = itm.id)"
+   ],
+   "caveats": "Sign conventions differ by type: ItemRcpt line quantity is positive, ItemShip line quantity is negative \u2014 the CASE branches normalize both to positive columns before computing net. ORDER BY repeats the full aggregate expression rather than relying on an alias. Includes transfer-order-sourced receipts and fulfillments, so net movement reflects ALL physical flow, not just buy/sell. mainline='F' AND taxline='F' plus the itemtype filter keep pseudo-lines out.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-MOVE-004",
+   "area": "supply-chain",
+   "category": "item-movement",
+   "scenario": "A distribution operations lead needs monthly inbound/outbound unit volume per warehouse to balance labor staffing and identify which sites carry the throughput.",
+   "question": "Show monthly units shipped and received by warehouse location.",
+   "intent": "Monthly shipped and received units grouped by transactionline location across ItemShip and ItemRcpt transactions.",
+   "keywords": [
+    "movement by location",
+    "warehouse throughput",
+    "units by location",
+    "monthly location movement",
+    "inbound outbound"
+   ],
+   "sql": "SELECT\n    BUILTIN.DF(tl.location) AS location_name,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS move_month,\n    SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) AS units_shipped,\n    SUM(CASE WHEN t.type = 'ItemRcpt' THEN tl.quantity ELSE 0 END) AS units_received\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item itm ON itm.id = tl.item\nWHERE t.type IN ('ItemShip', 'ItemRcpt')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.location IS NOT NULL\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY BUILTIN.DF(tl.location), TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY BUILTIN.DF(tl.location), TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "location_name",
+    "move_month",
+    "units_shipped",
+    "units_received"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = itm.id)"
+   ],
+   "caveats": "Location lives on transactionline, NOT the transaction header \u2014 grouping is on tl.location with BUILTIN.DF for the display name. ItemShip quantities are negated to positive; ItemRcpt quantities are already positive. Lines with NULL location (e.g. non-inventory charges) are excluded explicitly. GROUP BY repeats both full expressions (BUILTIN.DF and TO_CHAR) since aliases are not allowed in GROUP BY.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-MOVE-005",
+   "area": "supply-chain",
+   "category": "stock-ageing",
+   "scenario": "A merchandising manager wants a staleness ranking: for every active SKU, when did it last physically move in or out, so the oldest untouched items can be reviewed for markdown.",
+   "question": "For each item, when was the last shipment and last receipt, and how many days since any movement?",
+   "intent": "Per-item last ItemShip date, last ItemRcpt date, and days elapsed since the most recent physical movement, ranked stalest first.",
+   "keywords": [
+    "last movement date",
+    "days since shipment",
+    "stale inventory",
+    "stock ageing",
+    "last receipt date",
+    "dormant sku"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    MAX(CASE WHEN t.type = 'ItemShip' THEN t.trandate END) AS last_ship_date,\n    MAX(CASE WHEN t.type = 'ItemRcpt' THEN t.trandate END) AS last_receipt_date,\n    TRUNC(SYSDATE) - MAX(t.trandate) AS days_since_any_movement\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item itm ON itm.id = tl.item\nWHERE t.type IN ('ItemShip', 'ItemRcpt')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\nGROUP BY itm.itemid\nORDER BY TRUNC(SYSDATE) - MAX(t.trandate) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_name",
+    "last_ship_date",
+    "last_receipt_date",
+    "days_since_any_movement"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = itm.id)"
+   ],
+   "caveats": "This is a movement-date ageing PROXY: without the inventorynumber/lot tables, true FIFO layer age is not queryable, so days-since-last-movement stands in for it. Oracle date subtraction (TRUNC(SYSDATE) - MAX(trandate)) yields days as a number. Conditional MAX(CASE...) splits ship vs receipt recency in one pass; items with movement of only one type show NULL for the other. Items that have NEVER moved do not appear at all \u2014 pair with SC-MOVE-006 to catch those. ORDER BY repeats the expression, no alias.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-MOVE-006",
+   "area": "supply-chain",
+   "category": "stock-ageing",
+   "scenario": "A finance and supply chain team preparing an obsolescence reserve needs the list of items still sitting in the warehouse that have not shipped at all since a cutoff date.",
+   "question": "Which items have stock on hand but zero shipments since a given date?",
+   "intent": "Items with positive summed on-hand quantity in inventorybalance and NO ItemShip lines on or after :start, via NOT EXISTS.",
+   "keywords": [
+    "no shipments",
+    "dead stock",
+    "obsolete inventory",
+    "on hand no sales",
+    "not exists",
+    "excess stock",
+    "obsolescence reserve"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    itm.displayname AS item_description,\n    SUM(ib.quantityonhand) AS on_hand_units\nFROM inventorybalance ib\nJOIN item itm ON itm.id = ib.item\nWHERE itm.itemtype IN ('InvtPart', 'Assembly')\n    AND NOT EXISTS (\n        SELECT 1\n        FROM transactionline tl\n        JOIN transaction t ON t.id = tl.transaction\n        WHERE tl.item = ib.item\n            AND t.type = 'ItemShip'\n            AND tl.mainline = 'F'\n            AND tl.taxline = 'F'\n            AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    )\nGROUP BY itm.itemid, itm.displayname\nHAVING SUM(ib.quantityonhand) > 0\nORDER BY SUM(ib.quantityonhand) DESC",
+   "sample_shape": [
+    "item_name",
+    "item_description",
+    "on_hand_units"
+   ],
+   "joins": [
+    "inventorybalance->item (ib.item = itm.id)",
+    "transactionline->transaction (tl.transaction = t.id) [NOT EXISTS subquery]"
+   ],
+   "caveats": "inventorybalance is grained by location/status, so quantityonhand is SUMmed per item; HAVING keeps only items with net positive stock. NOT EXISTS is used instead of a LEFT JOIN anti-pattern so one shipment line anywhere disqualifies the item cleanly and the subquery still enforces mainline='F'/taxline='F'. Set :start to your staleness cutoff (e.g. 6 or 12 months back). Companies that ship via CashSale without fulfillments should add that type to the subquery.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-MOVE-007",
+   "area": "supply-chain",
+   "category": "stock-ageing",
+   "scenario": "An inventory planner needs a slow-mover ranking expressed as months of cover \u2014 how many months current stock would last at the trailing-12-month shipment rate \u2014 to prioritize purchasing freezes and clearance.",
+   "question": "Rank items by months of stock cover: on-hand units divided by average monthly units shipped over the last 12 months.",
+   "intent": "Per-item on-hand units, trailing-12-month shipped units, and months-of-cover ratio; items with stock but zero shipments sort to the top.",
+   "keywords": [
+    "slow movers",
+    "months of cover",
+    "stock to sales ratio",
+    "inventory turns",
+    "overstock ranking",
+    "shipment velocity"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    oh.on_hand_units AS on_hand_units,\n    NVL(sh.units_shipped_12m, 0) AS units_shipped_12m,\n    CASE WHEN NVL(sh.units_shipped_12m, 0) <= 0 THEN NULL\n        ELSE ROUND(oh.on_hand_units / (sh.units_shipped_12m / 12), 1) END AS months_of_cover\nFROM item itm\nJOIN (\n    SELECT ib.item AS item, SUM(ib.quantityonhand) AS on_hand_units\n    FROM inventorybalance ib\n    GROUP BY ib.item\n) oh ON oh.item = itm.id\nLEFT JOIN (\n    SELECT tl.item AS item, SUM(-tl.quantity) AS units_shipped_12m\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type = 'ItemShip'\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE), -12)\n    GROUP BY tl.item\n) sh ON sh.item = itm.id\nWHERE itm.itemtype IN ('InvtPart', 'Assembly')\n    AND oh.on_hand_units > 0\nORDER BY CASE WHEN NVL(sh.units_shipped_12m, 0) <= 0 THEN 999999\n    ELSE oh.on_hand_units / (sh.units_shipped_12m / 12) END DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_name",
+    "on_hand_units",
+    "units_shipped_12m",
+    "months_of_cover"
+   ],
+   "joins": [
+    "item->inventorybalance (itm.id = ib.item) [aggregated subquery]",
+    "item->transactionline (itm.id = tl.item) [LEFT JOIN aggregated subquery]",
+    "transactionline->transaction (tl.transaction = t.id)"
+   ],
+   "caveats": "Both sides are pre-aggregated in subqueries before joining, so the many-to-many between inventorybalance rows and shipment lines can never multiply units. Shipments use SUM(-tl.quantity) because ItemShip line quantities are negative. LEFT JOIN keeps never-shipped items; the ORDER BY CASE sentinel (999999) pushes zero-velocity items with stock to the top of the slow-mover list while months_of_cover shows NULL (undefined, not infinite). Trailing window is anchored with ADD_MONTHS(TRUNC(SYSDATE), -12).",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-MOVE-008",
+   "area": "supply-chain",
+   "category": "item-movement",
+   "scenario": "A controller wants item movement valued in dollars, not just units: the monthly COGS the GL actually recorded when fulfillments shipped, by item and subsidiary, to reconcile ops throughput to the P&L.",
+   "question": "What COGS value posted to the GL from item fulfillments, by item and month?",
+   "intent": "Monthly GL-posted COGS amount per item and subsidiary from transactionaccountingline rows on ItemShip transactions hitting COGS-type accounts.",
+   "keywords": [
+    "cogs by item",
+    "movement value",
+    "gl cogs",
+    "fulfillment cost",
+    "cost of goods shipped",
+    "transactionaccountingline"
+   ],
+   "sql": "SELECT\n    itm.itemid AS item_name,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary_name,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS ship_month,\n    SUM(tal.amount) AS cogs_posted\nFROM transaction t\nJOIN transactionaccountingline tal ON tal.transaction = t.id\nJOIN transactionline tl ON tl.transaction = tal.transaction\n    AND tl.id = tal.transactionline\nJOIN account a ON a.id = tal.account\nJOIN item itm ON itm.id = tl.item\nWHERE t.type = 'ItemShip'\n    AND tal.posting = 'T'\n    AND a.accttype = 'COGS'\n    AND itm.itemtype IN ('InvtPart', 'Assembly')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY itm.itemid, BUILTIN.DF(tl.subsidiary), TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY SUM(tal.amount) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_name",
+    "subsidiary_name",
+    "ship_month",
+    "cogs_posted"
+   ],
+   "joins": [
+    "transaction->transactionaccountingline (t.id = tal.transaction)",
+    "transactionaccountingline->transactionline (tal.transaction = tl.transaction AND tal.transactionline = tl.id)",
+    "transactionaccountingline->account (tal.account = a.id)",
+    "transactionline->item (tl.item = itm.id)"
+   ],
+   "caveats": "GL grain, not line grain: truth comes from transactionaccountingline with posting='T'; tal.amount is signed debit-positive, and COGS is an expense (debit - credit), so SUM(tal.amount) is directly the positive COGS posted \u2014 no negation. The compound join on (transaction, transactionline) ties each GL impact back to its item line for the item attribution. Subsidiary comes from transactionline (header subsidiary is not queryable) and results are in each subsidiary's base currency \u2014 do NOT sum across subsidiaries without translation. In accounts configured to post COGS at invoicing instead of fulfillment, change t.type to 'CustInvc'.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-PO-001",
+   "area": "supply-chain",
+   "category": "purchase-orders",
+   "scenario": "A purchasing manager at a wholesale distribution company wants a monthly view of committed purchase spend per vendor to track ordering trends and spot vendors whose order volume is ramping up or falling off.",
+   "question": "Show me total purchase order value and PO count by vendor and month for a date range.",
+   "intent": "Aggregates PurchOrd header totals and counts per vendor per calendar month over a parameterized date range.",
+   "keywords": [
+    "purchase order",
+    "po totals",
+    "vendor spend",
+    "monthly trend",
+    "purchord",
+    "committed spend"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    TO_CHAR(t.trandate, 'YYYY-MM') AS po_month,\n    COUNT(*) AS po_count,\n    SUM(t.foreigntotal) AS po_total\nFROM transaction t\n    JOIN vendor v ON v.id = t.entity\nWHERE t.type = 'PurchOrd'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.entityid, TO_CHAR(t.trandate, 'YYYY-MM')\nORDER BY v.entityid, TO_CHAR(t.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "vendor",
+    "po_month",
+    "po_count",
+    "po_total"
+   ],
+   "joins": [
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "PurchOrd headers store foreigntotal as a positive amount in the transaction currency (unlike vendor bills, which are credit-signed negative), so no negation is needed here. foreigntotal is NOT base currency: mixed-currency vendors sum nominal amounts; multiply by transaction.exchangerate if base-currency consolidation is needed. Entity is joined to vendor because PurchOrd is an AP-side type. GROUP BY repeats the TO_CHAR expression (no aliases allowed in GROUP BY).",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-PO-002",
+   "area": "supply-chain",
+   "category": "purchase-orders",
+   "scenario": "A supply chain director at a consumer-products importer reviews the largest purchase commitments each quarter before cash-flow planning meetings and needs the biggest POs with their current fulfillment status.",
+   "question": "What are our largest purchase orders by amount in this date range, with vendor and current status?",
+   "intent": "Ranks PurchOrd headers by foreigntotal descending with vendor, display status, and currency, limited to top :n rows.",
+   "keywords": [
+    "largest po",
+    "biggest purchase orders",
+    "top pos",
+    "po ranking",
+    "purchase commitments",
+    "status"
+   ],
+   "sql": "SELECT\n    t.tranid AS po_number,\n    t.trandate AS po_date,\n    v.entityid AS vendor,\n    BUILTIN.DF(t.status) AS status,\n    BUILTIN.DF(t.currency) AS currency,\n    t.foreigntotal AS po_total\nFROM transaction t\n    JOIN vendor v ON v.id = t.entity\nWHERE t.type = 'PurchOrd'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nORDER BY t.foreigntotal DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "po_number",
+    "po_date",
+    "vendor",
+    "status",
+    "currency",
+    "po_total"
+   ],
+   "joins": [
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "Status is displayed with BUILTIN.DF(t.status) because transaction.status is a raw per-type letter code ('A','B',...) that must never be compared to words like 'open'. foreigntotal is the transaction-currency amount, so currency is displayed alongside to avoid misreading mixed-currency rankings. Uses FETCH FIRST :n ROWS ONLY (never LIMIT/OFFSET).",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-PO-003",
+   "area": "supply-chain",
+   "category": "purchase-orders",
+   "scenario": "A procurement analyst at a retail products company is consolidating the supplier base and wants to see which vendors receive many small POs versus few large ones, to identify candidates for blanket orders.",
+   "question": "Give me PO count, total PO value, and average PO value by vendor for a date range, ranked by total spend.",
+   "intent": "Per-vendor PurchOrd count, sum, average, and max of header totals over a date range, top :n vendors by total.",
+   "keywords": [
+    "average po value",
+    "po count by vendor",
+    "vendor consolidation",
+    "purchase order stats",
+    "spend ranking"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    COUNT(*) AS po_count,\n    SUM(t.foreigntotal) AS total_po_value,\n    ROUND(AVG(t.foreigntotal), 2) AS avg_po_value,\n    MAX(t.foreigntotal) AS largest_po\nFROM transaction t\n    JOIN vendor v ON v.id = t.entity\nWHERE t.type = 'PurchOrd'\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.entityid\nORDER BY SUM(t.foreigntotal) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "vendor",
+    "po_count",
+    "total_po_value",
+    "avg_po_value",
+    "largest_po"
+   ],
+   "joins": [
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "Header-grain query: no transactionline join is needed, so no mainline filter applies. PurchOrd foreigntotal is positive (vendor-bill negative-sign rule does not apply to POs). Averages mix transaction currencies nominally for multi-currency vendors. ORDER BY repeats the aggregate expression rather than the alias for maximum dialect safety.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-PO-004",
+   "area": "supply-chain",
+   "category": "purchase-orders",
+   "scenario": "A buyer at a multi-subsidiary hardgoods wholesaler runs a weekly open-PO review to chase overdue inbound orders and needs every PO still awaiting receipt or billing, with its age and owning subsidiary.",
+   "question": "List all open purchase orders (not yet fully received/billed) with status, subsidiary, amount, and age in days.",
+   "intent": "Lists PurchOrd headers in open raw status codes (B, D, E, F) with BUILTIN.DF status/subsidiary display and age from trandate.",
+   "keywords": [
+    "open purchase orders",
+    "pending receipt",
+    "partially received",
+    "po aging",
+    "open po list",
+    "subsidiary"
+   ],
+   "sql": "SELECT\n    t.tranid AS po_number,\n    t.trandate AS po_date,\n    v.entityid AS vendor,\n    BUILTIN.DF(t.status) AS status,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary,\n    t.foreigntotal AS po_total,\n    TRUNC(SYSDATE) - t.trandate AS age_days\nFROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'\n    JOIN vendor v ON v.id = t.entity\nWHERE t.type = 'PurchOrd'\n    AND t.status IN ('B', 'D', 'E', 'F')\nORDER BY t.trandate",
+   "sample_shape": [
+    "po_number",
+    "po_date",
+    "vendor",
+    "status",
+    "subsidiary",
+    "po_total",
+    "age_days"
+   ],
+   "joins": [
+    "transaction->transactionline (transactionline.transaction = transaction.id, mainline='T')",
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "transaction.status is a RAW per-type letter code, so 'open' is expressed as the PurchOrd codes B (Pending Receipt), D (Partially Received), E (Pending Billing/Partially Received), F (Pending Bill) \u2014 never status='open'. The human-readable label comes from BUILTIN.DF(t.status). transaction.subsidiary is not queryable, so subsidiary is read from the mainline='T' transactionline row via BUILTIN.DF(tl.subsidiary); mainline='T' guarantees exactly one line per PO so the header grain is preserved.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-PO-005",
+   "area": "supply-chain",
+   "category": "vendor-performance",
+   "scenario": "An inbound logistics coordinator at a distribution company tracks how much physical product each supplier actually delivered per month, to compare receiving workload and supplier throughput against plan.",
+   "question": "How many item receipts and how many units did we receive from each vendor per month?",
+   "intent": "Counts ItemRcpt transactions and sums received line quantity per vendor per month, restricted to real product item types.",
+   "keywords": [
+    "item receipts",
+    "receipts by vendor",
+    "units received",
+    "inbound volume",
+    "itemrcpt",
+    "receiving"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    TO_CHAR(r.trandate, 'YYYY-MM') AS receipt_month,\n    COUNT(DISTINCT r.id) AS receipt_count,\n    SUM(rl.quantity) AS units_received\nFROM transaction r\n    JOIN transactionline rl ON rl.transaction = r.id AND rl.mainline = 'F' AND rl.taxline = 'F'\n    JOIN item i ON i.id = rl.item\n    JOIN vendor v ON v.id = r.entity\nWHERE r.type = 'ItemRcpt'\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'NonInvtPart')\n    AND r.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND r.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.entityid, TO_CHAR(r.trandate, 'YYYY-MM')\nORDER BY v.entityid, TO_CHAR(r.trandate, 'YYYY-MM')",
+   "sample_shape": [
+    "vendor",
+    "receipt_month",
+    "receipt_count",
+    "units_received"
+   ],
+   "joins": [
+    "transaction->transactionline (transactionline.transaction = transaction.id, mainline='F')",
+    "transactionline->item (transactionline.item = item.id)",
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "Line-grain sum, so mainline='F' AND taxline='F' are mandatory to avoid double counting header/tax rows, and item.itemtype is constrained to real product types so Subtotal/Markup/Discount pseudo-items never pollute quantity. Item receipt line quantities are positive (unlike sales lines, which would need negation). COUNT(DISTINCT r.id) counts receipts, not lines, so multi-line receipts are not overcounted. Entity on ItemRcpt resolves to the vendor from the source PO.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-PO-006",
+   "area": "supply-chain",
+   "category": "vendor-performance",
+   "scenario": "A finance-facing procurement lead at a wholesale company wants a per-vendor comparison of what was ordered on POs versus what was actually billed in the same window, as a rough proxy for PO-to-bill conversion and un-billed commitment.",
+   "question": "For each vendor, compare total PO value versus total vendor bill value in a date range and compute the bill-to-PO ratio.",
+   "intent": "Conditional aggregation over PurchOrd and VendBill headers per vendor: PO total, sign-corrected bill total, and their ratio.",
+   "keywords": [
+    "po to bill",
+    "conversion ratio",
+    "ordered vs billed",
+    "vendor bills",
+    "unbilled commitment",
+    "spend comparison"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    SUM(CASE WHEN t.type = 'PurchOrd' THEN t.foreigntotal ELSE 0 END) AS po_total,\n    SUM(CASE WHEN t.type = 'VendBill' THEN -t.foreigntotal ELSE 0 END) AS billed_total,\n    CASE\n        WHEN SUM(CASE WHEN t.type = 'PurchOrd' THEN t.foreigntotal ELSE 0 END) = 0 THEN NULL\n        ELSE ROUND(\n            SUM(CASE WHEN t.type = 'VendBill' THEN -t.foreigntotal ELSE 0 END)\n            / SUM(CASE WHEN t.type = 'PurchOrd' THEN t.foreigntotal ELSE 0 END), 4)\n    END AS bill_to_po_ratio\nFROM transaction t\n    JOIN vendor v ON v.id = t.entity\nWHERE t.type IN ('PurchOrd', 'VendBill')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY v.entityid\nORDER BY SUM(CASE WHEN t.type = 'PurchOrd' THEN t.foreigntotal ELSE 0 END) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "vendor",
+    "po_total",
+    "billed_total",
+    "bill_to_po_ratio"
+   ],
+   "joins": [
+    "transaction->vendor (transaction.entity = vendor.id)"
+   ],
+   "caveats": "Vendor bill foreigntotal is CREDIT-SIGNED (negative), so it is negated to positive spend, while PurchOrd foreigntotal is already positive \u2014 mixing them without the sign fix silently cancels the totals. The ratio is a period proxy, not a document-level link: bills dated in the window may bill POs from an earlier window, so ratios above 1 or below 1 near period boundaries are expected. Division is guarded with CASE (no alias references, expressions repeated).",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-PO-007",
+   "area": "supply-chain",
+   "category": "vendor-performance",
+   "scenario": "A controller at a products company auditing procurement wants GL-grade truth on where each vendor's bills actually posted in a given period \u2014 inventory, COGS, expense, or fixed assets \u2014 to catch miscoded supplier invoices.",
+   "question": "For a given accounting period, show posted vendor bill amounts by vendor and account type from the GL.",
+   "intent": "Sums posting='T' transactionaccountingline amounts on VendBill by vendor and account.accttype for one accounting period, excluding the AP offset.",
+   "keywords": [
+    "gl spend",
+    "vendor bill posting",
+    "account type",
+    "cogs vs expense",
+    "posted amounts",
+    "period",
+    "miscoding"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    a.accttype AS account_type,\n    SUM(tal.amount) AS posted_amount\nFROM transaction t\n    JOIN transactionaccountingline tal ON tal.transaction = t.id\n    JOIN account a ON a.id = tal.account\n    JOIN vendor v ON v.id = t.entity\n    JOIN accountingperiod ap ON ap.id = t.postingperiod\nWHERE t.type = 'VendBill'\n    AND tal.posting = 'T'\n    AND a.accttype <> 'AcctPay'\n    AND ap.periodname = :period\n    AND ap.isadjust = 'F'\nGROUP BY v.entityid, a.accttype\nORDER BY SUM(tal.amount) DESC",
+   "sample_shape": [
+    "vendor",
+    "account_type",
+    "posted_amount"
+   ],
+   "joins": [
+    "transaction->transactionaccountingline (transactionaccountingline.transaction = transaction.id)",
+    "transactionaccountingline->account (transactionaccountingline.account = account.id)",
+    "transaction->vendor (transaction.entity = vendor.id)",
+    "transaction->accountingperiod (transaction.postingperiod = accountingperiod.id)"
+   ],
+   "caveats": "GL truth comes from transactionaccountingline with posting='T'; tal.amount is signed (debit +, credit -), so the debit-side lines of a bill (Expense/COGS/InvAsset-type accounts) come out positive naturally and the AP credit offset is excluded via accttype <> 'AcctPay' instead of sign games. Period filtering joins accountingperiod through transaction.postingperiod and requires isadjust='F' to avoid rollup/adjustment rows. Amounts are in the transaction's subsidiary base ledger context.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-PO-008",
+   "area": "supply-chain",
+   "category": "vendor-performance",
+   "scenario": "A supply chain planner at an importer is validating vendor lead-time assumptions in the planning system and needs the actual average days from PO date to item receipt date for each supplier.",
+   "question": "What is the average number of days from purchase order date to item receipt date, by vendor?",
+   "intent": "Links ItemRcpt lines back to their source PurchOrd via transactionline.createdfrom, dedupes to receipt/PO pairs, and averages trandate deltas per vendor.",
+   "keywords": [
+    "lead time",
+    "po to receipt days",
+    "vendor lead time",
+    "createdfrom",
+    "receiving performance",
+    "delivery speed"
+   ],
+   "sql": "SELECT\n    v.entityid AS vendor,\n    COUNT(*) AS receipt_events,\n    ROUND(AVG(x.lead_days), 1) AS avg_lead_days,\n    MAX(x.lead_days) AS worst_lead_days\nFROM (\n    SELECT DISTINCT\n        r.id AS receipt_id,\n        p.id AS po_id,\n        p.entity AS vendor_id,\n        (r.trandate - p.trandate) AS lead_days\n    FROM transaction r\n        JOIN transactionline rl ON rl.transaction = r.id AND rl.mainline = 'F'\n        JOIN transaction p ON p.id = rl.createdfrom AND p.type = 'PurchOrd'\n    WHERE r.type = 'ItemRcpt'\n        AND r.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n        AND r.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\n) x\n    JOIN vendor v ON v.id = x.vendor_id\nGROUP BY v.entityid\nORDER BY ROUND(AVG(x.lead_days), 1) DESC",
+   "sample_shape": [
+    "vendor",
+    "receipt_events",
+    "avg_lead_days",
+    "worst_lead_days"
+   ],
+   "joins": [
+    "transaction(ItemRcpt)->transactionline (transactionline.transaction = transaction.id, mainline='F')",
+    "transactionline->transaction(PurchOrd) (transactionline.createdfrom = transaction.id)",
+    "derived->vendor (vendor_id = vendor.id)"
+   ],
+   "caveats": "The receipt-to-PO link lives on transactionline.createdfrom (not the header), so the join goes through non-mainline receipt lines and the inner SELECT DISTINCT collapses back to unique receipt/PO pairs \u2014 without it, multi-line receipts would overweight the average. Date subtraction yields days directly in this dialect. This measures PO date to receipt date, which includes vendor processing plus transit; POs never received are absent, so chronic non-shippers must be caught with the open-PO query instead. Vendor is taken from the PO header entity.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-PO-009",
+   "area": "supply-chain",
+   "category": "purchase-orders",
+   "scenario": "A category manager at a wholesale products company wants to know which items dominate purchasing spend and volume on POs in a period, to prioritize cost negotiations on the highest-spend SKUs.",
+   "question": "Which items have the highest purchase order spend and ordered quantity in this date range?",
+   "intent": "Line-grain aggregation of PurchOrd item lines: PO count, ordered quantity, and line amount per item, top :n by spend.",
+   "keywords": [
+    "top purchased items",
+    "po line spend",
+    "item spend",
+    "ordered quantity",
+    "sku negotiation",
+    "line grain"
+   ],
+   "sql": "SELECT\n    i.itemid AS item,\n    i.itemtype AS item_type,\n    COUNT(DISTINCT t.id) AS po_count,\n    SUM(tl.quantity) AS qty_ordered,\n    SUM(tl.netamount) AS po_line_amount\nFROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F'\n    JOIN item i ON i.id = tl.item\nWHERE t.type = 'PurchOrd'\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'NonInvtPart', 'Service')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY i.itemid, i.itemtype\nORDER BY SUM(tl.netamount) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item",
+    "item_type",
+    "po_count",
+    "qty_ordered",
+    "po_line_amount"
+   ],
+   "joins": [
+    "transaction->transactionline (transactionline.transaction = transaction.id, mainline='F')",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "Purchase-side line netamount and quantity are POSITIVE (only sales lines are negative and need SUM(-tl.netamount)), so no negation here. mainline='F' AND taxline='F' are required for any line-level sum, and item.itemtype is restricted to real purchasable types so Subtotal/Markup/Discount pseudo-items and description lines are excluded. Amounts are transaction-currency; group by BUILTIN.DF(tl.subsidiary) and apply exchangerate if base-currency consolidation is needed.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-SO-001",
+   "area": "supply-chain",
+   "category": "fulfillment",
+   "scenario": "A wholesale distributor's customer service team needs a live worklist of every sales order that is still open so they can answer 'where is my order?' calls without opening each record.",
+   "question": "Show me all open sales orders with their status, customer, date and total.",
+   "intent": "Lists open sales order headers (pending approval through pending billing) with a human-readable status via BUILTIN.DF, customer name, date and order total.",
+   "keywords": [
+    "open sales orders",
+    "order status",
+    "pending fulfillment",
+    "sales order list",
+    "builtin.df status",
+    "order book"
+   ],
+   "sql": "SELECT\n    t.tranid AS order_number,\n    t.trandate AS order_date,\n    c.entityid AS customer,\n    BUILTIN.DF(t.status) AS order_status,\n    t.foreigntotal AS order_total,\n    BUILTIN.DF(t.currency) AS currency\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'SalesOrd'\n    AND t.status IN ('A', 'B', 'D', 'E', 'F')\nORDER BY t.trandate ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "order_number",
+    "order_date",
+    "customer",
+    "order_status",
+    "order_total",
+    "currency"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "transaction.status is a raw letter code per type: for SalesOrd A=Pending Approval, B=Pending Fulfillment, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing (C/G/H are Cancelled/Billed/Closed) \u2014 never filter status='open'. BUILTIN.DF(t.status) is used only for display. foreigntotal is fine here because a sales order is non-posting (the foreignamountunpaid rule applies to AR/AP balances). transaction.subsidiary is not queryable, so subsidiary is intentionally omitted from this header-grain query; join transactionline if you need it.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-SO-002",
+   "area": "supply-chain",
+   "category": "fulfillment",
+   "scenario": "The sales operations manager at a consumer products company tracks bookings momentum and needs monthly sales order value per subsidiary to compare against the demand plan.",
+   "question": "What is our booked sales order value by month and subsidiary for a date range?",
+   "intent": "Sums sales order line value (sign-corrected, converted to subsidiary base currency via exchangerate) grouped by order month and line subsidiary, excluding pseudo-items.",
+   "keywords": [
+    "sales order value",
+    "bookings by month",
+    "monthly demand",
+    "order intake",
+    "booked value",
+    "subsidiary bookings"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS order_month,\n    BUILTIN.DF(tl.subsidiary) AS subsidiary,\n    COUNT(DISTINCT t.id) AS order_count,\n    SUM(-tl.netamount * t.exchangerate) AS booked_value_base\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'SalesOrd'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND i.itemtype NOT IN ('Subtotal', 'Markup', 'Discount', 'Description', 'Payment')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM'), BUILTIN.DF(tl.subsidiary)\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM'), BUILTIN.DF(tl.subsidiary)",
+   "sample_shape": [
+    "order_month",
+    "subsidiary",
+    "order_count",
+    "booked_value_base"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "Sales line netamount is negative, so SUM(-tl.netamount) yields positive bookings. mainline='F' AND taxline='F' prevents double counting the header row and tax lines; the item join excludes Subtotal/Markup/Discount pseudo-items. Subsidiary comes from transactionline (header subsidiary is not queryable). exchangerate converts each order to its own subsidiary's base currency \u2014 values are comparable within a subsidiary row but cross-subsidiary totals mix base currencies. GROUP BY repeats the full expressions (no aliases).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-SO-003",
+   "area": "supply-chain",
+   "category": "backorders",
+   "scenario": "A retail products company's supply planner wants to know which SKUs have shipped fewer units than customers ordered in the period, as an early proxy for backorder exposure before running MRP.",
+   "question": "For each item, how many units were ordered on sales orders versus shipped on item fulfillments in a date range, and what is the unfulfilled gap?",
+   "intent": "Conditional aggregation over SalesOrd and ItemShip lines per item: ordered units minus shipped units, returning only items with a positive unfulfilled gap.",
+   "keywords": [
+    "unfulfilled demand",
+    "ordered vs shipped",
+    "backorder proxy",
+    "item fulfillment gap",
+    "shipped units",
+    "demand shortfall"
+   ],
+   "sql": "SELECT\n    i.itemid AS item,\n    i.itemtype AS item_type,\n    SUM(CASE WHEN t.type = 'SalesOrd' THEN -tl.quantity ELSE 0 END) AS ordered_units,\n    SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) AS shipped_units,\n    SUM(CASE WHEN t.type = 'SalesOrd' THEN -tl.quantity ELSE 0 END)\n        - SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) AS unfulfilled_units_proxy\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type IN ('SalesOrd', 'ItemShip')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'Kit')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY i.itemid, i.itemtype\nHAVING SUM(CASE WHEN t.type = 'SalesOrd' THEN -tl.quantity ELSE 0 END)\n    - SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) > 0\nORDER BY SUM(CASE WHEN t.type = 'SalesOrd' THEN -tl.quantity ELSE 0 END)\n    - SUM(CASE WHEN t.type = 'ItemShip' THEN -tl.quantity ELSE 0 END) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item",
+    "item_type",
+    "ordered_units",
+    "shipped_units",
+    "unfulfilled_units_proxy"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "Both SalesOrd and ItemShip inventory lines carry NEGATIVE transactionline.quantity (outbound convention), so both sides are negated to positive units. This is a period PROXY: fulfillments shipped in-window against orders booked before :start inflate shipped_units, and it does not link SO lines to their specific fulfillments (createdfrom-level tracing is out of scope). mainline='F'/taxline='F' plus restricting itemtype to real stocked types keeps pseudo-lines out. HAVING and ORDER BY repeat the full expressions rather than aliases for dialect safety.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-SO-004",
+   "area": "supply-chain",
+   "category": "fulfillment",
+   "scenario": "The warehouse manager at a distribution company runs a daily stand-up on the oldest orders still awaiting fulfillment so the pick team can clear aged demand first.",
+   "question": "Which are our oldest sales orders still waiting to be fulfilled, and how many days have they been open?",
+   "intent": "Ranks sales orders in fulfillment-pending statuses by age in days (oldest first) with customer, status display and order total.",
+   "keywords": [
+    "oldest open orders",
+    "order aging",
+    "days open",
+    "awaiting fulfillment",
+    "aged demand",
+    "pick priority"
+   ],
+   "sql": "SELECT\n    t.tranid AS order_number,\n    t.trandate AS order_date,\n    TRUNC(SYSDATE) - t.trandate AS days_open,\n    c.entityid AS customer,\n    BUILTIN.DF(t.status) AS order_status,\n    t.foreigntotal AS order_total\nFROM transaction t\nJOIN customer c ON c.id = t.entity\nWHERE t.type = 'SalesOrd'\n    AND t.status IN ('B', 'D', 'E')\nORDER BY t.trandate ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "order_number",
+    "order_date",
+    "days_open",
+    "customer",
+    "order_status",
+    "order_total"
+   ],
+   "joins": [
+    "transaction->customer (transaction.entity = customer.id)"
+   ],
+   "caveats": "Filters the raw SalesOrd letter codes that still have fulfillment outstanding: B=Pending Fulfillment, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled. Deliberately excludes A (Pending Approval \u2014 not releasable to the warehouse) and F (Pending Billing \u2014 fully shipped). Never filter status by display label; BUILTIN.DF is display-only. Age computed as TRUNC(SYSDATE) - trandate in the SuiteQL date dialect.",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-SO-005",
+   "area": "supply-chain",
+   "category": "fulfillment",
+   "scenario": "A multi-warehouse retailer's operations director compares throughput across distribution centers each month to balance labor and decide where to route new orders.",
+   "question": "How many item fulfillments and shipped units did each location process per month?",
+   "intent": "Counts item fulfillment transactions and sums shipped units grouped by fulfillment line location and ship month over a date range.",
+   "keywords": [
+    "fulfillment volume",
+    "shipments by location",
+    "warehouse throughput",
+    "units shipped",
+    "item fulfillment",
+    "monthly shipping"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS ship_month,\n    BUILTIN.DF(tl.location) AS location,\n    COUNT(DISTINCT t.id) AS fulfillment_count,\n    SUM(-tl.quantity) AS units_shipped\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'ItemShip'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'Kit')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY TO_CHAR(t.trandate, 'YYYY-MM'), BUILTIN.DF(tl.location)\nORDER BY TO_CHAR(t.trandate, 'YYYY-MM'), BUILTIN.DF(tl.location)",
+   "sample_shape": [
+    "ship_month",
+    "location",
+    "fulfillment_count",
+    "units_shipped"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "Item fulfillments are type 'ItemShip'. Location lives on transactionline, not the transaction header, hence BUILTIN.DF(tl.location). Outbound fulfillment line quantities are negative, so SUM(-tl.quantity) gives positive shipped units. Restricting itemtype to stocked types keeps shipping-charge/service lines out of the unit count. Counts every shipped fulfillment regardless of eventual invoicing status.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-SO-006",
+   "area": "supply-chain",
+   "category": "backorders",
+   "scenario": "The inventory planner at a wholesale company needs a daily list of SKUs where open sales order demand already exceeds what is available on hand, so purchasing can expedite before customers are put on backorder.",
+   "question": "Which items have more open sales order units than quantity available in inventory right now?",
+   "intent": "Aggregates open SO line units per item and left-joins aggregated inventorybalance quantityavailable, returning items where demand exceeds availability ranked by shortfall.",
+   "keywords": [
+    "backorder risk",
+    "demand vs available",
+    "stockout risk",
+    "open so demand",
+    "quantityavailable",
+    "shortfall",
+    "expedite list"
+   ],
+   "sql": "SELECT\n    i.itemid AS item,\n    d.open_so_units AS open_so_units,\n    NVL(b.qty_available, 0) AS qty_available,\n    d.open_so_units - NVL(b.qty_available, 0) AS shortfall_units\nFROM (\n    SELECT\n        tl.item AS item,\n        SUM(-tl.quantity) AS open_so_units\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type = 'SalesOrd'\n        AND t.status IN ('B', 'D', 'E')\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND tl.isclosed = 'F'\n    GROUP BY tl.item\n) d\nJOIN item i ON i.id = d.item\nLEFT JOIN (\n    SELECT\n        ib.item AS item,\n        SUM(ib.quantityavailable) AS qty_available\n    FROM inventorybalance ib\n    GROUP BY ib.item\n) b ON b.item = d.item\nWHERE i.itemtype IN ('InvtPart', 'Assembly')\n    AND d.open_so_units - NVL(b.qty_available, 0) > :threshold\nORDER BY d.open_so_units - NVL(b.qty_available, 0) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item",
+    "open_so_units",
+    "qty_available",
+    "shortfall_units"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transactionline->item (aggregated subquery item = item.id)",
+    "transactionline->inventorybalance (item, aggregated subqueries)"
+   ],
+   "caveats": "Demand side uses raw open-status letter codes B/D/E and negates the negative SO line quantity; tl.isclosed='F' drops manually closed lines. Demand is GROSS ordered units on open orders \u2014 on partially fulfilled orders the already-shipped portion is still counted (pair with SC-SO-003 for a shipped-net view). inventorybalance is summed across all locations/bins into a company-wide available figure; LEFT JOIN + NVL keeps items with zero inventory rows in the result. :threshold=0 lists every at-risk item.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-SO-007",
+   "area": "supply-chain",
+   "category": "backorders",
+   "scenario": "A products company's VP of Sales wants to know which customers are carrying the largest unshipped order backlog so account managers can proactively communicate delays to the biggest-impact accounts.",
+   "question": "Which customers have the highest open (unshipped) sales order backlog value?",
+   "intent": "Sums sign-corrected open SO line value in subsidiary base currency per customer across fulfillment-pending orders, ranked descending.",
+   "keywords": [
+    "backlog by customer",
+    "open order value",
+    "unshipped backlog",
+    "customer backorders",
+    "backlog ranking"
+   ],
+   "sql": "SELECT\n    c.entityid AS customer,\n    COUNT(DISTINCT t.id) AS open_orders,\n    SUM(-tl.netamount * t.exchangerate) AS open_backlog_base\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN customer c ON c.id = t.entity\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'SalesOrd'\n    AND t.status IN ('B', 'D', 'E')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.isclosed = 'F'\n    AND i.itemtype NOT IN ('Subtotal', 'Markup', 'Discount', 'Description', 'Payment')\nGROUP BY c.entityid\nORDER BY SUM(-tl.netamount * t.exchangerate) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "customer",
+    "open_orders",
+    "open_backlog_base"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transaction->customer (transaction.entity = customer.id)",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "SalesOrd is an AR-side type, so entity joins to customer (polymorphic entity rule). Line netamount is negative \u2014 negated for positive backlog. Backlog is the full remaining-open line value on orders in statuses B/D/E; on partially fulfilled orders the shipped-but-unbilled portion is still included, so treat as an upper-bound backlog. exchangerate converts to each transaction's subsidiary base currency; if you run multiple base currencies, add BUILTIN.DF(tl.subsidiary) to the grouping before comparing across subsidiaries.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-SO-008",
+   "area": "supply-chain",
+   "category": "backorders",
+   "scenario": "The supply chain director at a distribution company reviews a weekly aging snapshot of the unshipped order backlog to see whether delayed orders are piling up in the oldest buckets.",
+   "question": "Break down our open unshipped sales order backlog into aging buckets (0-7, 8-14, 15-30, 31+ days) with order counts and value.",
+   "intent": "Buckets fulfillment-pending sales orders by days since order date and returns order count and sign-corrected base-currency backlog value per bucket.",
+   "keywords": [
+    "backlog aging",
+    "aging buckets",
+    "order age analysis",
+    "delayed orders",
+    "unshipped aging",
+    "backorder aging"
+   ],
+   "sql": "SELECT\n    CASE\n        WHEN TRUNC(SYSDATE) - t.trandate <= 7 THEN '0-7 days'\n        WHEN TRUNC(SYSDATE) - t.trandate <= 14 THEN '8-14 days'\n        WHEN TRUNC(SYSDATE) - t.trandate <= 30 THEN '15-30 days'\n        ELSE '31+ days'\n    END AS age_bucket,\n    COUNT(DISTINCT t.id) AS open_orders,\n    SUM(-tl.netamount * t.exchangerate) AS backlog_value_base\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'SalesOrd'\n    AND t.status IN ('B', 'D', 'E')\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.isclosed = 'F'\n    AND i.itemtype NOT IN ('Subtotal', 'Markup', 'Discount', 'Description', 'Payment')\nGROUP BY CASE\n        WHEN TRUNC(SYSDATE) - t.trandate <= 7 THEN '0-7 days'\n        WHEN TRUNC(SYSDATE) - t.trandate <= 14 THEN '8-14 days'\n        WHEN TRUNC(SYSDATE) - t.trandate <= 30 THEN '15-30 days'\n        ELSE '31+ days'\n    END\nORDER BY MIN(TRUNC(SYSDATE) - t.trandate)",
+   "sample_shape": [
+    "age_bucket",
+    "open_orders",
+    "backlog_value_base"
+   ],
+   "joins": [
+    "transaction->transactionline (transaction.id = transactionline.transaction)",
+    "transactionline->item (transactionline.item = item.id)"
+   ],
+   "caveats": "The full CASE expression is repeated verbatim in GROUP BY because SuiteQL rejects aliases there; buckets are ordered chronologically via ORDER BY MIN(age) instead of alphabetical bucket labels. Open backlog uses raw status codes B/D/E and open lines only (isclosed='F'), with negated netamount and exchangerate conversion to subsidiary base. Ages from trandate, not promised ship date \u2014 if you track expected ship dates in a custom field this understates lateness for future-dated orders.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-XFER-001",
+   "area": "supply-chain",
+   "category": "transfer-orders",
+   "scenario": "A wholesale distributor rebalances stock between its central DC and regional warehouses and wants to see how much product moved on each lane every month to plan trucking capacity.",
+   "question": "How many transfer orders and how many units moved between each pair of locations per month?",
+   "intent": "Monthly transfer-order counts and total unit quantity per from-location/to-location lane from TrnfrOrd item lines.",
+   "keywords": [
+    "transfer order",
+    "location lane",
+    "monthly volume",
+    "stock movement",
+    "trnfrord",
+    "warehouse transfer"
+   ],
+   "sql": "SELECT\n    TO_CHAR(t.trandate, 'YYYY-MM') AS transfer_month,\n    BUILTIN.DF(tl.location) AS from_location,\n    BUILTIN.DF(t.transferlocation) AS to_location,\n    COUNT(DISTINCT t.id) AS transfer_order_count,\n    SUM(-tl.quantity) AS total_units_transferred\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'TrnfrOrd'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.quantity < 0\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'Kit')\n    AND t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n    AND t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\nGROUP BY\n    TO_CHAR(t.trandate, 'YYYY-MM'),\n    BUILTIN.DF(tl.location),\n    BUILTIN.DF(t.transferlocation)\nORDER BY\n    TO_CHAR(t.trandate, 'YYYY-MM'),\n    SUM(-tl.quantity) DESC",
+   "sample_shape": [
+    "transfer_month",
+    "from_location",
+    "to_location",
+    "transfer_order_count",
+    "total_units_transferred"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = i.id)"
+   ],
+   "caveats": "TrnfrOrd item lines carry NEGATIVE quantity (outbound at the source), so quantity is negated and filtered to quantity < 0 to avoid picking up system lines. mainline='F' AND taxline='F' prevents header/tax double counting. Source location comes from transactionline.location; destination is the header field transaction.transferlocation (only populated on transfer orders). item.itemtype constrained to real stockable items so Description/other pseudo-lines are excluded. GROUP BY repeats full expressions (no aliases).",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-XFER-002",
+   "area": "supply-chain",
+   "category": "transfer-orders",
+   "scenario": "An inventory planner at a multi-warehouse retail products company suspects a handful of SKUs generate most inter-warehouse shuffling and wants a ranked list to consider changing their default stocking locations.",
+   "question": "Which items have been transferred between locations the most in the last 6 months?",
+   "intent": "Top :n items ranked by total transferred unit quantity on TrnfrOrd lines over the trailing 6 months.",
+   "keywords": [
+    "most transferred items",
+    "transfer order",
+    "top skus",
+    "inter-warehouse",
+    "rebalancing",
+    "ranking"
+   ],
+   "sql": "SELECT\n    i.itemid AS item_sku,\n    i.displayname AS item_name,\n    COUNT(DISTINCT t.id) AS transfer_order_count,\n    SUM(-tl.quantity) AS total_units_transferred\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nJOIN item i ON i.id = tl.item\nWHERE t.type = 'TrnfrOrd'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.quantity < 0\n    AND i.itemtype IN ('InvtPart', 'Assembly', 'Kit')\n    AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -6)\nGROUP BY\n    i.itemid,\n    i.displayname\nORDER BY SUM(-tl.quantity) DESC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "transfer_order_count",
+    "total_units_transferred"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)",
+    "transactionline->item (tl.item = i.id)"
+   ],
+   "caveats": "Transfer-order item lines are negative, so SUM(-tl.quantity) yields positive units moved; quantity < 0 guards against non-item lines. mainline='F' AND taxline='F' required before summing lines. itemtype restricted to stockable items to exclude Subtotal/Markup/Discount pseudo-items. FETCH FIRST :n ROWS ONLY used for the ranking (never LIMIT/OFFSET). Rolling window anchored to month start via TRUNC(SYSDATE,'MM').",
+   "difficulty": "easy"
+  },
+  {
+   "id": "SC-XFER-003",
+   "area": "supply-chain",
+   "category": "transfer-orders",
+   "scenario": "A supply chain manager reviews stuck inter-company and intra-company transfers weekly; transfers that sit unfulfilled tie up stock that neither location can sell.",
+   "question": "Show me open transfer orders with remaining unshipped quantity, oldest first, including how many days each has been open.",
+   "intent": "Header-level list of transfer orders with unfulfilled remaining quantity, days open, displayed status, and lane, oldest first.",
+   "keywords": [
+    "open transfer orders",
+    "aging",
+    "unfulfilled",
+    "days open",
+    "stuck transfers",
+    "remaining quantity"
+   ],
+   "sql": "SELECT\n    t.tranid AS transfer_number,\n    t.trandate AS order_date,\n    TRUNC(SYSDATE) - t.trandate AS days_open,\n    BUILTIN.DF(t.status) AS status_label,\n    BUILTIN.DF(t.transferlocation) AS to_location,\n    MIN(BUILTIN.DF(tl.location)) AS from_location,\n    MIN(BUILTIN.DF(tl.subsidiary)) AS subsidiary_name,\n    SUM(-tl.quantity) AS ordered_units,\n    SUM(NVL(tl.quantityshiprecv, 0)) AS shipped_units,\n    SUM(-tl.quantity - NVL(tl.quantityshiprecv, 0)) AS remaining_units\nFROM transaction t\nJOIN transactionline tl ON tl.transaction = t.id\nWHERE t.type = 'TrnfrOrd'\n    AND tl.mainline = 'F'\n    AND tl.taxline = 'F'\n    AND tl.quantity < 0\n    AND tl.isclosed = 'F'\nGROUP BY\n    t.tranid,\n    t.trandate,\n    TRUNC(SYSDATE) - t.trandate,\n    BUILTIN.DF(t.status),\n    BUILTIN.DF(t.transferlocation)\nHAVING SUM(-tl.quantity - NVL(tl.quantityshiprecv, 0)) > 0\nORDER BY t.trandate ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "transfer_number",
+    "order_date",
+    "days_open",
+    "status_label",
+    "to_location",
+    "from_location",
+    "subsidiary_name",
+    "ordered_units",
+    "shipped_units",
+    "remaining_units"
+   ],
+   "joins": [
+    "transaction->transactionline (t.id = tl.transaction)"
+   ],
+   "caveats": "Openness is derived from line facts, NOT from filtering raw status codes: isclosed='F' plus HAVING remaining > 0 (ordered minus quantityshiprecv). transaction.status is displayed only via BUILTIN.DF. Line quantity is negative so ordered units = SUM(-tl.quantity); quantityshiprecv is stored positive on these lines. Subsidiary read from transactionline (transaction.subsidiary is not queryable) and wrapped in MIN() since it is constant per order. All non-aggregated SELECT expressions repeated verbatim in GROUP BY.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-XFER-004",
+   "area": "supply-chain",
+   "category": "transfer-orders",
+   "scenario": "Operations leadership at a multi-site distributor wants to know which warehouse lanes are slow to pick and ship internal transfers, to set realistic in-transit lead times in planning.",
+   "question": "What is the average number of days from transfer order date to fulfillment ship date, by lane?",
+   "intent": "Average and max days between TrnfrOrd trandate and linked ItemShip trandate per from/to location lane, using transactionline.createdfrom.",
+   "keywords": [
+    "transfer lead time",
+    "fulfillment cycle time",
+    "createdfrom",
+    "itemship",
+    "lane performance",
+    "days to ship"
+   ],
+   "sql": "SELECT\n    BUILTIN.DF(x.from_loc) AS from_location,\n    BUILTIN.DF(x.to_loc) AS to_location,\n    COUNT(x.ful_id) AS fulfillment_count,\n    ROUND(AVG(x.ship_date - x.order_date), 1) AS avg_days_order_to_ship,\n    MAX(x.ship_date - x.order_date) AS max_days_order_to_ship\nFROM (\n    SELECT DISTINCT\n        if_t.id AS ful_id,\n        if_t.trandate AS ship_date,\n        to_t.trandate AS order_date,\n        tol.location AS from_loc,\n        to_t.transferlocation AS to_loc\n    FROM transaction if_t\n    JOIN transactionline ifl ON ifl.transaction = if_t.id\n        AND ifl.mainline = 'F'\n        AND ifl.taxline = 'F'\n    JOIN transaction to_t ON to_t.id = ifl.createdfrom\n        AND to_t.type = 'TrnfrOrd'\n    JOIN transactionline tol ON tol.transaction = to_t.id\n        AND tol.mainline = 'T'\n    WHERE if_t.type = 'ItemShip'\n        AND if_t.trandate >= TO_DATE(:start, 'YYYY-MM-DD')\n        AND if_t.trandate <= TO_DATE(:end, 'YYYY-MM-DD')\n) x\nGROUP BY\n    BUILTIN.DF(x.from_loc),\n    BUILTIN.DF(x.to_loc)\nORDER BY AVG(x.ship_date - x.order_date) DESC",
+   "sample_shape": [
+    "from_location",
+    "to_location",
+    "fulfillment_count",
+    "avg_days_order_to_ship",
+    "max_days_order_to_ship"
+   ],
+   "joins": [
+    "transaction(ItemShip)->transactionline (if_t.id = ifl.transaction)",
+    "transactionline->transaction(TrnfrOrd) (ifl.createdfrom = to_t.id)",
+    "transaction(TrnfrOrd)->transactionline (to_t.id = tol.transaction, mainline='T')"
+   ],
+   "caveats": "The fulfillment-to-order link lives on transactionline.createdfrom (not the transaction header), so the ItemShip is joined line-first then rolled up with SELECT DISTINCT to one row per fulfillment \u2014 otherwise AVG would be weighted by line count. Source location comes from the transfer order's mainline='T' header row; destination from transaction.transferlocation. Restricting createdfrom target to type='TrnfrOrd' excludes sales order fulfillments. Date subtraction returns day counts in SuiteQL's Oracle-style dialect. Partially shipped orders contribute one row per fulfillment, so multi-shipment TOs are averaged per shipment.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-XFER-005",
+   "area": "supply-chain",
+   "category": "demand-supply",
+   "scenario": "A demand planner at a consumer goods wholesaler runs a weekly net-position check: open sales order demand against on-hand stock plus open purchase order supply, to see which SKUs will go short before inbound arrives.",
+   "question": "For each inventory item, compare open sales order demand vs open purchase order supply vs current on-hand, and show the projected net position, worst first.",
+   "intent": "Per-item comparison of open SO quantity (demand), open PO quantity (supply proxy), inventorybalance on-hand/available, and projected net position (available + open PO - open SO).",
+   "keywords": [
+    "demand vs supply",
+    "net position",
+    "open sales orders",
+    "open purchase orders",
+    "on-hand",
+    "shortage projection"
+   ],
+   "sql": "SELECT\n    i.itemid AS item_sku,\n    i.displayname AS item_name,\n    NVL(oh.qty_on_hand, 0) AS qty_on_hand,\n    NVL(oh.qty_available, 0) AS qty_available,\n    NVL(so.open_so_qty, 0) AS open_demand_qty,\n    NVL(po.open_po_qty, 0) AS open_supply_qty,\n    NVL(oh.qty_available, 0) + NVL(po.open_po_qty, 0) - NVL(so.open_so_qty, 0) AS projected_net_position\nFROM item i\nLEFT JOIN (\n    SELECT\n        ib.item AS item,\n        SUM(ib.quantityonhand) AS qty_on_hand,\n        SUM(ib.quantityavailable) AS qty_available\n    FROM inventorybalance ib\n    GROUP BY ib.item\n) oh ON oh.item = i.id\nLEFT JOIN (\n    SELECT\n        tl.item AS item,\n        SUM(-tl.quantity - NVL(tl.quantityshiprecv, 0)) AS open_so_qty\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type = 'SalesOrd'\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND tl.isclosed = 'F'\n        AND tl.quantity < 0\n    GROUP BY tl.item\n    HAVING SUM(-tl.quantity - NVL(tl.quantityshiprecv, 0)) > 0\n) so ON so.item = i.id\nLEFT JOIN (\n    SELECT\n        tl.item AS item,\n        SUM(tl.quantity - NVL(tl.quantityshiprecv, 0)) AS open_po_qty\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type = 'PurchOrd'\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND tl.isclosed = 'F'\n        AND tl.quantity > 0\n    GROUP BY tl.item\n    HAVING SUM(tl.quantity - NVL(tl.quantityshiprecv, 0)) > 0\n) po ON po.item = i.id\nWHERE i.itemtype = 'InvtPart'\n    AND (NVL(so.open_so_qty, 0) > 0 OR NVL(po.open_po_qty, 0) > 0)\nORDER BY NVL(oh.qty_available, 0) + NVL(po.open_po_qty, 0) - NVL(so.open_so_qty, 0) ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "qty_on_hand",
+    "qty_available",
+    "open_demand_qty",
+    "open_supply_qty",
+    "projected_net_position"
+   ],
+   "joins": [
+    "item->inventorybalance (i.id = ib.item, aggregated inline view)",
+    "transaction->transactionline (t.id = tl.transaction, SO demand inline view)",
+    "transaction->transactionline (t.id = tl.transaction, PO supply inline view)"
+   ],
+   "caveats": "Open quantities are computed from line facts, never from status text: isclosed='F' plus (ordered - quantityshiprecv) > 0. Sales lines are NEGATIVE so demand = SUM(-tl.quantity - fulfilled); PO lines are POSITIVE so supply = SUM(quantity - received); quantityshiprecv is positive on both. inventorybalance is bin/location grain, so it is pre-aggregated per item before joining to avoid row multiplication. itemtype='InvtPart' keeps the report to stockable goods and excludes pseudo-items. Quantities span all locations and subsidiaries; net position is a company-wide proxy, not a location-level ATP.",
+   "difficulty": "hard"
+  },
+  {
+   "id": "SC-XFER-006",
+   "area": "supply-chain",
+   "category": "demand-supply",
+   "scenario": "An inventory controller at a products company wants a months-of-cover view: how long current available stock will last at the recent shipping run-rate, to spot both imminent stockouts and dead stock.",
+   "question": "For items that shipped in the last 6 months, how many months of cover does current available inventory represent at the average monthly shipped rate?",
+   "intent": "Per-item coverage ratio: total quantityavailable divided by average monthly shipped quantity from ItemShip lines over the trailing 6 complete months, lowest cover first.",
+   "keywords": [
+    "months of cover",
+    "coverage ratio",
+    "run rate",
+    "stockout risk",
+    "shipped quantity",
+    "inventory turns"
+   ],
+   "sql": "SELECT\n    i.itemid AS item_sku,\n    i.displayname AS item_name,\n    NVL(oh.qty_available, 0) AS qty_available,\n    ROUND(sh.shipped_qty_6m / 6, 1) AS avg_monthly_shipped_qty,\n    ROUND(NVL(oh.qty_available, 0) / (sh.shipped_qty_6m / 6), 1) AS months_of_cover\nFROM item i\nJOIN (\n    SELECT\n        tl.item AS item,\n        SUM(-tl.quantity) AS shipped_qty_6m\n    FROM transaction t\n    JOIN transactionline tl ON tl.transaction = t.id\n    WHERE t.type = 'ItemShip'\n        AND tl.mainline = 'F'\n        AND tl.taxline = 'F'\n        AND tl.quantity < 0\n        AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -6)\n        AND t.trandate < TRUNC(SYSDATE, 'MM')\n    GROUP BY tl.item\n    HAVING SUM(-tl.quantity) > 0\n) sh ON sh.item = i.id\nLEFT JOIN (\n    SELECT\n        ib.item AS item,\n        SUM(ib.quantityavailable) AS qty_available\n    FROM inventorybalance ib\n    GROUP BY ib.item\n) oh ON oh.item = i.id\nWHERE i.itemtype = 'InvtPart'\nORDER BY ROUND(NVL(oh.qty_available, 0) / (sh.shipped_qty_6m / 6), 1) ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "qty_available",
+    "avg_monthly_shipped_qty",
+    "months_of_cover"
+   ],
+   "joins": [
+    "item->transaction/transactionline (ItemShip shipped inline view, sh.item = i.id)",
+    "item->inventorybalance (aggregated inline view, oh.item = i.id)"
+   ],
+   "caveats": "Outbound fulfillment lines (ItemShip) are NEGATIVE, so shipped units = SUM(-tl.quantity) with quantity < 0 as a guard. The 6-month window uses complete calendar months (>= ADD_MONTHS(TRUNC(SYSDATE,'MM'),-6) AND < TRUNC(SYSDATE,'MM')) so the partial current month does not dilute the run-rate. Division by zero is impossible because the inner HAVING requires shipped > 0; items with zero recent shipments are deliberately excluded (their cover is undefined/infinite). ItemShip includes fulfillments of transfer orders as well as sales orders \u2014 the run-rate is total outbound velocity, stated as a demand proxy. inventorybalance pre-aggregated per item to collapse bin/location rows.",
+   "difficulty": "medium"
+  },
+  {
+   "id": "SC-XFER-007",
+   "area": "supply-chain",
+   "category": "demand-supply",
+   "scenario": "A warehouse planner needs a daily pick-list of item/location combinations that have fallen below the reorder threshold, and wants to see whether other locations hold enough company-wide stock to justify a transfer instead of a purchase.",
+   "question": "Which item/location combinations are below :threshold available units, and does the company have enough stock elsewhere to transfer?",
+   "intent": "Item-location rows from inventorybalance where local quantityavailable is below :threshold but company-wide available exceeds it, flagging transfer-order candidates.",
+   "keywords": [
+    "replenishment",
+    "below threshold",
+    "low stock",
+    "transfer candidate",
+    "quantityavailable",
+    "item location"
+   ],
+   "sql": "SELECT\n    i.itemid AS item_sku,\n    i.displayname AS item_name,\n    BUILTIN.DF(ib.location) AS location_name,\n    SUM(ib.quantityonhand) AS qty_on_hand_here,\n    SUM(ib.quantityavailable) AS qty_available_here,\n    MAX(co.total_available) AS qty_available_companywide,\n    MAX(co.total_available) - SUM(ib.quantityavailable) AS qty_available_elsewhere\nFROM inventorybalance ib\nJOIN item i ON i.id = ib.item\nJOIN (\n    SELECT\n        ib2.item AS item,\n        SUM(ib2.quantityavailable) AS total_available\n    FROM inventorybalance ib2\n    GROUP BY ib2.item\n) co ON co.item = ib.item\nWHERE i.itemtype = 'InvtPart'\nGROUP BY\n    i.itemid,\n    i.displayname,\n    BUILTIN.DF(ib.location)\nHAVING SUM(ib.quantityavailable) < :threshold\n    AND MAX(co.total_available) > :threshold\nORDER BY SUM(ib.quantityavailable) ASC\nFETCH FIRST :n ROWS ONLY",
+   "sample_shape": [
+    "item_sku",
+    "item_name",
+    "location_name",
+    "qty_on_hand_here",
+    "qty_available_here",
+    "qty_available_companywide",
+    "qty_available_elsewhere"
+   ],
+   "joins": [
+    "inventorybalance->item (ib.item = i.id)",
+    "inventorybalance->inventorybalance (company-wide inline view, co.item = ib.item)"
+   ],
+   "caveats": "inventorybalance is bin-level grain, so quantities are SUMmed per item-location; the company-wide total is pre-aggregated in an inline view and read with MAX() (constant per item) to satisfy the strict GROUP BY rule. Threshold tests live in HAVING because they apply to aggregates. Location displayed via BUILTIN.DF(ib.location). The company-wide > :threshold condition filters to rows where a transfer (rather than a purchase) is plausible; a single flat :threshold is used \u2014 replace with an item reorder-point field if one is maintained. itemtype='InvtPart' excludes non-stock items.",
+   "difficulty": "medium"
+  }
+ ]
+}

@@ -3,10 +3,15 @@
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
-import { EXAMPLES } from '../lib/examples.js';
+import { QUERIES } from '../lib/library/index.js';
 import { TABLES } from '../lib/schema.js';
 
-const SUGGESTIONS = EXAMPLES.slice(0, 5).map((e) => e.question);
+// Suggestion chips: representative verified-library questions.
+const SUGGESTED_IDS = ['REV-001', 'AR-002', 'REV-002', 'AP-001', 'GL-002'];
+const SUGGESTIONS = SUGGESTED_IDS
+  .map((id) => QUERIES.find((q) => q.id === id))
+  .filter(Boolean)
+  .map((q) => q.question || q.intent);
 const HISTORY_KEY = 'suitesense-history';
 
 /* Minimal inline icon set (Lucide paths) — no icon dependency. */
@@ -152,19 +157,15 @@ export default function Console() {
     }
   }
 
-  // Real-account SuiteQL uses columns/params the in-browser sample DB doesn't
-  // have (foreignamountunpaid, mainline, BUILTIN.DF, GL lines, :placeholders).
-  const targetsLiveAccount = (q) =>
-    /:\w+|foreignamountunpaid|\bmainline\b|\btaxline\b|BUILTIN\.|transactionaccountingline|foreignamount\b/i.test(q);
+  // The demo dataset mirrors real SuiteQL semantics (mainline/tax rows, signed
+  // amounts, status codes, unpaid balances, BUILTIN.DF via the dialect bridge),
+  // so every generated query is executed here. If one still exceeds the demo's
+  // dialect, we say so instead of showing a scary error.
+  const [demoGap, setDemoGap] = useState(null);
 
   async function run(query = sql) {
     setError(null);
-    if (targetsLiveAccount(query)) {
-      // Don't pretend to run live-account SQL against the sample SQLite.
-      setResults(null);
-      setElapsed(null);
-      return;
-    }
+    setDemoGap(null);
     try {
       const t0 = performance.now();
       const res = await runSuiteQL(query);
@@ -172,7 +173,8 @@ export default function Console() {
       setResults(res);
     } catch (err) {
       setResults(null);
-      setError(`Query failed: ${err.message}`);
+      setElapsed(null);
+      setDemoGap(String(err.message || err));
     }
   }
 
@@ -204,7 +206,7 @@ export default function Console() {
             target="_blank"
             rel="noreferrer"
           >
-            Built by Bivek Shah
+            Built with ❤️ By Trickster
           </a>
         </div>
       </header>
@@ -305,10 +307,16 @@ export default function Console() {
                   ))}
                 </ul>
               )}
-              {targetsLiveAccount(sql) && (
+              {results?.substituted && (
                 <p className="live-note">
                   <Icon d={I.db} size={13} />
-                  Written for a live NetSuite account. The in-browser demo only holds the sample schema, so copy this into your NetSuite SuiteQL console to run it.
+                  Ran against the demo dataset with sample values filled in for the :placeholders. Adjust them before using this on a live account.
+                </p>
+              )}
+              {demoGap && (
+                <p className="live-note">
+                  <Icon d={I.db} size={13} />
+                  This query uses live-account features beyond the demo dialect ({demoGap}). It is written for a real NetSuite account — copy it into your SuiteQL console to run it.
                 </p>
               )}
             </section>
@@ -378,9 +386,7 @@ export default function Console() {
       </main>
 
       <footer className="foot">
-        <span>
-          Built by <a href="https://www.linkedin.com/in/bivekshah/" target="_blank" rel="noreferrer">Bivek Shah</a> — queries never leave your browser.
-        </span>
+        <span>Queries never leave your browser.</span>
       </footer>
     </div>
     </>
