@@ -183,7 +183,7 @@ export default function Console() {
   return (
     <>
     <div className="promo-banner">
-      Live demo — every query runs in your browser, no NetSuite account needed.
+      Live demo with local execution. Queries never leave your browser.
     </div>
     <div className="shell">
       <header className="topbar">
@@ -385,9 +385,6 @@ export default function Console() {
         </aside>
       </main>
 
-      <footer className="foot">
-        <span>Queries never leave your browser.</span>
-      </footer>
     </div>
     </>
   );
