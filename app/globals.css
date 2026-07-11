@@ -966,3 +966,18 @@ tbody tr:hover {
 .lib-cols { display: flex; flex-wrap: wrap; gap: 0.35rem; }
 .lib-col { font-family: var(--mono); font-size: 12px; color: var(--slate); background: var(--surface-soft); border: 1px solid var(--hairline-soft); padding: 3px 8px; border-radius: 5px; }
 .lib-note { font-size: 13px; color: var(--steel); border-top: 1px solid var(--hairline-soft); padding-top: 0.9rem; margin-top: 0.4rem; line-height: 1.5; }
+
+.live-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.45rem;
+  margin-top: 1rem;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--slate);
+  background: var(--primary-soft);
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--r-lg);
+  padding: 0.6rem 0.8rem;
+}
+.live-note svg { margin-top: 2px; flex: none; color: var(--primary); }

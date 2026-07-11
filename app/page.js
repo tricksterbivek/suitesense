@@ -152,8 +152,19 @@ export default function Console() {
     }
   }
 
+  // Real-account SuiteQL uses columns/params the in-browser sample DB doesn't
+  // have (foreignamountunpaid, mainline, BUILTIN.DF, GL lines, :placeholders).
+  const targetsLiveAccount = (q) =>
+    /:\w+|foreignamountunpaid|\bmainline\b|\btaxline\b|BUILTIN\.|transactionaccountingline|foreignamount\b/i.test(q);
+
   async function run(query = sql) {
     setError(null);
+    if (targetsLiveAccount(query)) {
+      // Don't pretend to run live-account SQL against the sample SQLite.
+      setResults(null);
+      setElapsed(null);
+      return;
+    }
     try {
       const t0 = performance.now();
       const res = await runSuiteQL(query);
@@ -203,7 +214,7 @@ export default function Console() {
           {!started && (
             <section className="hero">
               <h1>Ask your ERP anything.</h1>
-              <p>Plain English in, runnable SuiteQL out — executed live against a NetSuite-shaped dataset.</p>
+              <p>Plain English in, runnable SuiteQL out, executed live against a NetSuite-shaped dataset.</p>
             </section>
           )}
 
@@ -293,6 +304,12 @@ export default function Console() {
                     </li>
                   ))}
                 </ul>
+              )}
+              {targetsLiveAccount(sql) && (
+                <p className="live-note">
+                  <Icon d={I.db} size={13} />
+                  Written for a live NetSuite account. The in-browser demo only holds the sample schema, so copy this into your NetSuite SuiteQL console to run it.
+                </p>
               )}
             </section>
           )}

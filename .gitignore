@@ -5,3 +5,10 @@ node_modules/
 .vercel
 public/sql-wasm.wasm
 .DS_Store
+
+# eval transient outputs
+scripts/eval-results.jsonl
+scripts/gen-sqls.json
+scripts/lib-live.json
+probe-*.yml
+.playwright-mcp/
