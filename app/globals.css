@@ -984,3 +984,37 @@ tbody tr:hover {
 
 .lib-scenario { font-size: 14px; line-height: 1.55; color: var(--slate); margin-top: 0.4rem; }
 .lib-intent { font-family: var(--mono); font-size: 12px; color: var(--steel); margin-top: 0.35rem; }
+
+/* ---------- placeholder fill-in form ---------- */
+
+.param-form {
+  margin-top: 1rem;
+  border: 1px solid var(--hairline-soft);
+  background: var(--surface-soft);
+  border-radius: var(--r-lg);
+  padding: 0.85rem 1rem;
+}
+.param-form-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-deep);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.6rem;
+}
+.param-fields { display: flex; flex-wrap: wrap; gap: 0.8rem; }
+.param-field { display: flex; flex-direction: column; gap: 0.2rem; min-width: 150px; flex: 1 1 150px; max-width: 220px; }
+.param-label { font-size: 12px; font-weight: 600; color: var(--charcoal); }
+.param-field input {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-lg);
+  padding: 6px 10px;
+  font: 400 14px/1.4 var(--sans);
+  color: var(--ink);
+  background: var(--canvas);
+  outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+.param-field input:focus { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.param-hint { font-size: 11px; color: var(--steel); line-height: 1.35; }
+.param-note { margin-top: 0.65rem; font-size: 12.5px; color: var(--slate); line-height: 1.45; }
