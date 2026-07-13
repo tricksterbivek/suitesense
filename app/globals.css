@@ -1060,6 +1060,10 @@ tbody tr:hover {
 }
 
 @media (max-width: 639px) {
+  .topbar,
+  .topbar-right {
+    flex-wrap: wrap; /* let topbar items flow to a new row instead of overflowing narrow viewports */
+  }
   .support-pill {
     padding: 8px 12px;
   }
