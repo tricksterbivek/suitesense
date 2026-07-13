@@ -234,7 +234,7 @@ export default function Console() {
           >
             Built with ❤️ By Trickster
           </a>
-          <SupportLink pulseKey={resultPulse} />
+          <SupportLink pulseKey={resultPulse} appearAfterPulse />
         </div>
       </header>
 
