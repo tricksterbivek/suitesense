@@ -68,3 +68,11 @@ Successful `run()` on the console → `resultPulse` increments → SupportLink p
 ## Rollout
 
 Branch `feat/support-link` → PR → merge to `main` → `vercel deploy --prod --yes`. No environment variables, no migrations.
+
+## Amendment (2026-07-13, post-launch): reveal after first result
+
+Owner request: the pill must be invisible at first and only appear after the first result.
+
+- `SupportLink` gains an `appearAfterPulse` prop (default false). When set, the component renders nothing until `pulseKey` first increments — all hooks still run, and SSR/first client render agree (both see `pulseKey` 0), so there is no hydration mismatch. The pill's debut coincides with the first heartbeat pulse.
+- The console passes `appearAfterPulse`: the pill is absent from the console's initial HTML and appears on the first successful run of a visit. No persistence across reloads — each visit re-earns the ask.
+- The library page is unchanged (always visible): it has no query execution, and hiding the pill there would remove the funding entry point for visitors who land on /library directly.

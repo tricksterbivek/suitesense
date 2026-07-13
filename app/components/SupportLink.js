@@ -9,11 +9,14 @@ const PULSE_DURATION_MS = 1800; // heartbeat 0.9s x2 in globals.css
 
 // Topbar "Support SuiteSense" pill. The heart pulses when pulseKey increments
 // (a query run succeeded), throttled so the param form's auto re-runs can't
-// cause a pulse storm. The modal iframes Buy Me a Coffee's widget page — the
-// same URL their floating-widget script embeds — so donors pay without
-// leaving the site and we ship zero third-party scripts. Nothing loads from
-// BMC until the pill is clicked.
-export default function SupportLink({ pulseKey = 0 }) {
+// cause a pulse storm. With appearAfterPulse the pill stays out of the DOM
+// until the first pulseKey increment, so the ask only shows up once the
+// product has delivered a result — its debut coincides with the first
+// heartbeat. The modal iframes Buy Me a Coffee's widget page — the same URL
+// their floating-widget script embeds — so donors pay without leaving the
+// site and we ship zero third-party scripts. Nothing loads from BMC until
+// the pill is clicked.
+export default function SupportLink({ pulseKey = 0, appearAfterPulse = false }) {
   const [open, setOpen] = useState(false);
   const [pulsing, setPulsing] = useState(false);
   const lastPulse = useRef(0);
@@ -43,6 +46,11 @@ export default function SupportLink({ pulseKey = 0 }) {
       document.body.style.overflow = '';
     };
   }, [open]);
+
+  // After all hooks (rules of hooks): pages that reveal on results render
+  // nothing until the first successful run. SSR and first client render
+  // agree (pulseKey starts 0), so there is no hydration mismatch.
+  if (appearAfterPulse && !pulseKey) return null;
 
   return (
     <>
