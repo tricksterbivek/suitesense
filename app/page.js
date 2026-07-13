@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { runSuiteQL } from '../lib/sqlite.js';
 import { detectParams, fillParams } from '../lib/translate.js';
 import ParamForm, { defaultParamValues } from './components/ParamForm.js';
+import SupportLink from './components/SupportLink.js';
 import { QUERIES } from '../lib/library/index.js';
 import { TABLES } from '../lib/schema.js';
 
@@ -184,6 +185,8 @@ export default function Console() {
   // so every generated query is executed here. If one still exceeds the demo's
   // dialect, we say so instead of showing a scary error.
   const [demoGap, setDemoGap] = useState(null);
+  // Counts successful runs; SupportLink pulses on increments (never on errors).
+  const [resultPulse, setResultPulse] = useState(0);
 
   async function run(query = resolvedSql) {
     setError(null);
@@ -193,6 +196,7 @@ export default function Console() {
       const res = await runSuiteQL(query);
       setElapsed(Math.max(1, Math.round(performance.now() - t0)));
       setResults(res);
+      setResultPulse((p) => p + 1);
     } catch (err) {
       setResults(null);
       setElapsed(null);
@@ -230,6 +234,7 @@ export default function Console() {
           >
             Built with ❤️ By Trickster
           </a>
+          <SupportLink pulseKey={resultPulse} />
         </div>
       </header>
 
