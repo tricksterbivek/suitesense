@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { QUERIES, CATEGORIES } from '../../lib/library/index.js';
 import LibraryBrowser from './browser.js';
+import SupportLink from '../components/SupportLink.js';
 
 export const metadata = {
   title: 'Query Library — SuiteSense',
@@ -22,6 +23,7 @@ export default function LibraryPage() {
         </Link>
         <div className="topbar-right">
           <Link className="byline" href="/">← Console</Link>
+          <SupportLink />
         </div>
       </header>
 
