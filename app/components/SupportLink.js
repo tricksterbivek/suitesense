@@ -17,16 +17,21 @@ export default function SupportLink({ pulseKey = 0 }) {
   const [open, setOpen] = useState(false);
   const [pulsing, setPulsing] = useState(false);
   const lastPulse = useRef(0);
+  const pulseTimer = useRef(null);
 
+  // Timer lives in a ref: cooldown-rejected pulseKey increments must not
+  // clear a pending reset (keyed cleanup would strand pulsing=true).
   useEffect(() => {
     if (!pulseKey) return; // mount / pages that never pulse
     const now = Date.now();
     if (now - lastPulse.current < PULSE_COOLDOWN_MS) return;
     lastPulse.current = now;
     setPulsing(true);
-    const t = setTimeout(() => setPulsing(false), PULSE_DURATION_MS);
-    return () => clearTimeout(t);
+    clearTimeout(pulseTimer.current);
+    pulseTimer.current = setTimeout(() => setPulsing(false), PULSE_DURATION_MS);
   }, [pulseKey]);
+
+  useEffect(() => () => clearTimeout(pulseTimer.current), []);
 
   useEffect(() => {
     if (!open) return;
@@ -69,6 +74,9 @@ export default function SupportLink({ pulseKey = 0 }) {
               the model bill. A stronger model means faster, more accurate SuiteQL for
               everyone. If it saved you time, consider fueling it.
             </p>
+            {/* Deliberately un-sandboxed: any sandbox loose enough for BMC's
+                payment flows (3DS popups, wallets) adds nothing, and stricter
+                silently breaks them. allow="payment" enables wallet buttons. */}
             <iframe src={WIDGET_URL} title="Support SuiteSense on Buy Me a Coffee" allow="payment" />
           </div>
         </div>

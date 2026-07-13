@@ -1059,7 +1059,7 @@ tbody tr:hover {
   28% { transform: scale(1); }
 }
 
-@media (max-width: 639px) {
+@media (max-width: 767px) {
   .topbar,
   .topbar-right {
     flex-wrap: wrap; /* let topbar items flow to a new row instead of overflowing narrow viewports */
@@ -1068,7 +1068,7 @@ tbody tr:hover {
     padding: 8px 12px;
   }
   .support-pill-label {
-    display: none; /* icon-only pill keeps the topbar intact on phones */
+    display: none; /* icon-only pill on the house mobile breakpoint (matches 767px used elsewhere) */
   }
 }
 
